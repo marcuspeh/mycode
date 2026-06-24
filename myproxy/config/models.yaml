@@ -1,0 +1,12 @@
+models:
+  claude-minimax-3:
+    provider: minimax
+    model: MiniMax-M3
+
+  claude-minimax-2.7:
+    provider: minimax
+    model: MiniMax-2.7
+
+  claude-minimax-2.7-flash:
+    provider: minimax
+    model: MiniMax-2.7-Flash
