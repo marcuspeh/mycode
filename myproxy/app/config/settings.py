@@ -17,6 +17,7 @@ class Settings(BaseSettings):
 
     # Provider API keys (optional: a provider is only enabled if its key is set).
     MINIMAX_API_KEY: str | None = None
+    DEEPSEEK_API_KEY: str | None = None
 
     # Filesystem layout (relative to project root unless absolute).
     project_root: Path = Path(__file__).resolve().parents[2]
@@ -25,7 +26,7 @@ class Settings(BaseSettings):
 
     # HTTP server.
     host: str = "0.0.0.0"
-    port: int = 8000
+    port: int = 3566
 
     # Request defaults.
     request_timeout_seconds: float = 300.0

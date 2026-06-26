@@ -28,6 +28,9 @@ models:
   claude-minimax-3:
     provider: minimax
     model: MiniMax-M1
+  claude-deepseek3:
+    provider: deepseek
+    model: deepseek-chat
 """
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".yaml", delete=False
@@ -53,6 +56,7 @@ class TestModelRegistry:
     def test_loads_models(self, temp_models_file: Path):
         registry = ModelRegistry(temp_models_file)
         assert registry.get("claude-minimax-3") == ("minimax", "MiniMax-M1")
+        assert registry.get("claude-deepseek3") == ("deepseek", "deepseek-chat")
 
     def test_unknown_model_returns_none(self, temp_models_file: Path):
         registry = ModelRegistry(temp_models_file)
@@ -62,10 +66,11 @@ class TestModelRegistry:
         registry = ModelRegistry(temp_models_file)
         models = registry.list_models()
         assert "claude-minimax-3" in models
+        assert "claude-deepseek3" in models
 
     def test_hot_reload(self, temp_models_file: Path):
         registry = ModelRegistry(temp_models_file)
-        assert "claude-minimax-3" in registry.list_models()
+        assert "claude-deepseek3" in registry.list_models()
 
         new_content = """
 models:
@@ -76,7 +81,7 @@ models:
         temp_models_file.write_text(new_content)
 
         assert registry.get("claude-new-model") == ("minimax", "MiniMax-2.7")
-        assert registry.get("claude-minimax-3") is None
+        assert registry.get("claude-deepseek3") is None
 
     def test_missing_file(self):
         registry = ModelRegistry(Path("/nonexistent/models.yaml"))
@@ -121,13 +126,13 @@ class TestMessagesEndpoint:
     @patch("app.api.anthropic.get_provider")
     @patch("app.api.anthropic.get_registry")
     def test_missing_provider_key_returns_400(self, mock_registry, mock_get_provider):
-        mock_registry.return_value.get.return_value = ("minimax", "MiniMax-M1")
+        mock_registry.return_value.get.return_value = ("deepseek", "deepseek-chat")
         mock_get_provider.return_value = None
 
         response = client.post(
             "/v1/messages",
             json={
-                "model": "claude-minimax-3",
+                "model": "claude-deepseek3",
                 "messages": [{"role": "user", "content": "Hello"}],
                 "max_tokens": 100,
             },
@@ -229,3 +234,29 @@ class TestMiniMaxProvider:
         assert result.stop_reason == "end_turn"
         assert result.input_tokens == 100
         assert result.output_tokens == 50
+
+
+class TestDeepSeekProvider:
+    def test_parse_response(self):
+        from app.providers.deepseek import DeepSeekProvider
+
+        provider = DeepSeekProvider("fake-key")
+        data = {
+            "content": [
+                {"type": "text", "text": "Hello from DeepSeek"},
+                {
+                    "type": "tool_use",
+                    "id": "toolu_01",
+                    "name": "read_file",
+                    "input": {"path": "/tmp/test"},
+                },
+            ],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 20, "output_tokens": 30},
+        }
+        result = provider._parse_response(data)
+        assert "Hello from DeepSeek" in result.content
+        assert "tool_use" in result.content
+        assert result.stop_reason == "end_turn"
+        assert result.input_tokens == 20
+        assert result.output_tokens == 30

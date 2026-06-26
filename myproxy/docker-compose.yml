@@ -6,13 +6,14 @@ services:
     container_name: myproxy
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      - "3566:3566"
     environment:
       - MINIMAX_API_KEY=${MINIMAX_API_KEY:-}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
     volumes:
       - ./config:/app/config
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:3566/health"]
       interval: 30s
       timeout: 10s
       retries: 3

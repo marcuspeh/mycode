@@ -1,12 +1,12 @@
 # myproxy
 
-Anthropic-compatible proxy server for MiniMax.
+Anthropic-compatible proxy server for MiniMax and DeepSeek.
 
 ## Setup
 
 ```bash
 cp .env.example .env
-# Add your API key to .env
+# Add your API key(s) to .env
 
 docker compose up -d
 ```
@@ -30,9 +30,9 @@ models:
     provider: minimax
     model: MiniMax-M1
 
-  claude-minimax-2.7:
-    provider: minimax
-    model: MiniMax-2.7
+  claude-deepseek3:
+    provider: deepseek
+    model: deepseek-chat
 ```
 
 ## Environment Variables
@@ -40,6 +40,7 @@ models:
 | Variable | Description |
 |----------|-------------|
 | `MINIMAX_API_KEY` | MiniMax API key |
+| `DEEPSEEK_API_KEY` | DeepSeek API key |
 | `MYPROXY_CONFIG_DIR` | Override config directory |
 
 ## Development

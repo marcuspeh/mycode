@@ -1,4 +1,8 @@
-"""mycode — interactive CLI wrapper that launches Claude Code with a custom LLM.
+"""mycode — interactive CLI wrapper that launches the `claude` CLI (Claude Code).
+
+This launches the Claude Code command-line tool (not the Claude IDE extension)
+with ANTHROPIC_BASE_URL pointed at myproxy, so any model from the registry
+can be used as a drop-in replacement.
 
 Usage:
     mycode                       # Fetch models, pick interactively
