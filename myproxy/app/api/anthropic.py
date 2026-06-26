@@ -6,6 +6,7 @@ and formats responses back into Anthropic-compatible JSON / SSE.
 from __future__ import annotations
 
 import json
+import logging
 import time
 import uuid
 from typing import AsyncIterator
@@ -17,6 +18,9 @@ from pydantic import BaseModel, Field
 from app.providers import get_provider
 from app.providers.base import ProviderResponse
 from app.registry.model_registry import get_registry
+from app.scrubber import get_scrubber
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1", tags=["anthropic"])
 
@@ -166,6 +170,18 @@ async def messages(
     tools_list: list[dict[str, object]] | None = None
     if request.tools:
         tools_list = [t.model_dump() for t in request.tools]
+
+    # Scrub outbound payload (PII / secrets).
+    scrubber = get_scrubber()
+    if system_text is not None:
+        system_text = scrubber.scrub({"s": system_text}).redacted["s"]
+    scrub_result = scrubber.scrub(
+        {"messages": messages_list, "tools": tools_list or []}
+    )
+    messages_list = scrub_result.redacted["messages"]  # type: ignore[index]
+    tools_list = scrub_result.redacted["tools"] or None  # type: ignore[index]
+    if scrub_result.events:
+        logger.info("scrubbed", extra={"event_count": len(scrub_result.events)})
 
     # Call provider
     t0 = time.monotonic()

@@ -31,6 +31,9 @@ class Settings(BaseSettings):
     # Request defaults.
     request_timeout_seconds: float = 300.0
 
+    # Scrubber.
+    scrub_enabled: bool = True
+
     def model_post_init(self, _ctx: object) -> None:
         """Resolve runtime paths."""
         import os
