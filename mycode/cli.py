@@ -58,13 +58,23 @@ def _select_model_interactive(
         )
         raise typer.Exit(code=1)
 
-    choices = [
-        Choice(
-            title=f"{spec.get('model', '?')}",
-            value=(alias, spec),
+    choices: list[Choice[tuple[str, dict[str, Any]]]] = []
+    for alias, spec in models:
+        model_name = spec.get("model", "?")
+        context_length = spec.get("context_length", 0)
+        choices.append(
+            Choice(
+                title=model_name,
+                value=(alias, spec),
+            )
         )
-        for alias, spec in models
-    ]
+        if context_length >= 1_000_000:
+            choices.append(
+                Choice(
+                    title=f"{model_name}[1m]",
+                    value=(alias, spec),
+                )
+            )
 
     selected = questionary.select(
         prompt,
