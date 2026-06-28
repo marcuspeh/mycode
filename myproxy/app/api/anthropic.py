@@ -12,7 +12,7 @@ import uuid
 from typing import AsyncIterator
 
 from fastapi import APIRouter, HTTPException, Request as FastAPIRequest
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.providers import get_provider
@@ -126,7 +126,7 @@ async def messages(
             detail=f"Unknown model: {request.model}",
         )
 
-    provider_name, actual_model = resolved
+    provider_name, actual_model, context_length = resolved
     provider = get_provider(provider_name)
     if provider is None:
         raise HTTPException(
@@ -209,7 +209,11 @@ async def messages(
             raise HTTPException(status_code=500, detail="Unexpected provider response")
 
         anthropic_resp = _provider_response_to_anthropic(pr, request.model)
-        return anthropic_resp
+        from fastapi.responses import JSONResponse
+        return JSONResponse(
+            content=anthropic_resp,
+            headers={"X-Context-Length": str(context_length)},
+        )
 
     # Streaming
     async def stream_wrapper() -> AsyncIterator[str]:
@@ -229,5 +233,6 @@ async def messages(
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
+            "X-Context-Length": str(context_length),
         },
     )

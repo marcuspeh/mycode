@@ -2,19 +2,24 @@ models:
   claude-lb-minimax-m3:
     provider: minimax
     model: MiniMax-M3
+    context_length: 1000000
 
   claude-lb-minimax-m2.7:
     provider: minimax
     model: MiniMax-M2.7
+    context_length: 200000
 
   claude-lb-minimax-m2.7-flash:
     provider: minimax
     model: MiniMax-M2.7-highspeed
+    context_length: 200000
 
   claude-lb-deepseek-v4-pro:
     provider: deepseek
     model: deepseek-v4-pro
+    context_length: 1000000
 
   claude-lb-deepseek-v4-flash:
     provider: deepseek
     model: deepseek-v4-flash
+    context_length: 1000000

@@ -46,13 +46,13 @@ class ModelRegistry:
         if self._file_has_changed():
             self.reload()
 
-    def get(self, model_name: str) -> tuple[str, str] | None:
-        """Return (provider_name, actual_model) or None."""
+    def get(self, model_name: str) -> tuple[str, str, int] | None:
+        """Return (provider_name, actual_model, context_length) or None."""
         self._maybe_reload()
         entry = self._models.get(model_name)
         if entry is None:
             return None
-        return entry["provider"], entry["model"]
+        return entry["provider"], entry["model"], entry.get("context_length", 0)
 
     def list_models(self) -> dict[str, dict[str, str]]:
         """Return full model mapping for admin API."""
