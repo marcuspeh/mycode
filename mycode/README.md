@@ -26,7 +26,6 @@ mycode --base-url http://192.168.1.100:3566
 |----------|---------|-------------|
 | `ANTHROPIC_BASE_URL` | `http://127.0.0.1:3566` | myproxy server URL |
 | `ANTHROPIC_MODEL` | `claude-{model}` | Model name sent to proxy |
-| `MYCODE_MACHINE` | hostname | Machine identifier |
 | `CLAUDE_BIN` | `claude` | Path to claude binary |
 
 ## Install

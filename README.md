@@ -38,9 +38,6 @@ docker compose up -d
 ### Client (Macbook / Laptop)
 
 ```bash
-# Set machine name (optional)
-export MYCODE_MACHINE=macbook
-
 # Interactive picker — fetches available models from myproxy
 mycode
 

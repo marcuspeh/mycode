@@ -28,7 +28,6 @@ app = typer.Typer(
 
 # Defaults
 DEFAULT_BASE_URL = "http://127.0.0.1:3566"
-DEFAULT_MACHINE = os.environ.get("MYCODE_MACHINE") or os.uname().nodename
 
 
 def _fetch_models(base_url: str) -> list[tuple[str, dict[str, Any]]]:
@@ -108,21 +107,24 @@ def main() -> None:
     if not models:
         typer.echo("error: no models configured on the proxy", err=True)
         raise typer.Exit(code=1)
-    name, chosen = _select_model_interactive(models, prompt="Select main model:")
-    actual = chosen.get("model", "unknown")
-    typer.echo(f"main model: {name} ({actual})")
 
-    fast_name, fast_chosen = _select_model_interactive(
-        models, prompt="Select small/fast model:"
-    )
-    fast_actual = fast_chosen.get("model", "unknown")
-    typer.echo(f"small/fast model: {fast_name} ({fast_actual})")
+    aliases = {
+        "opus": "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "sonnet": "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "haiku": "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    }
+    picks: dict[str, str] = {}
+    for alias, env_var in aliases.items():
+        name, _ = _select_model_interactive(
+            models, prompt=f"Select model for '{alias}' ({env_var}):"
+        )
+        picks[alias] = name
+        typer.echo(f"  {alias} -> {name}")
 
     env = os.environ.copy()
     env["ANTHROPIC_BASE_URL"] = DEFAULT_BASE_URL
-    env["ANTHROPIC_MODEL"] = name
-    env["ANTHROPIC_SMALL_FAST_MODEL"] = fast_name
-    env["MYCODE_MACHINE"] = DEFAULT_MACHINE
+    for alias, env_var in aliases.items():
+        env[env_var] = picks[alias]
     env.setdefault("ANTHROPIC_AUTH_TOKEN", "sk-dummy")
 
     claude_bin = _find_claude()
@@ -130,7 +132,7 @@ def main() -> None:
 
     typer.echo(
         f"mycode: launching claude "
-        f"(base_url={DEFAULT_BASE_URL}, model={name}, small_fast={fast_name}, extra_args={extra_args})"
+        f"(base_url={DEFAULT_BASE_URL}, opus={picks['opus']}, sonnet={picks['sonnet']}, haiku={picks['haiku']}, extra_args={extra_args})"
     )
 
     try:
