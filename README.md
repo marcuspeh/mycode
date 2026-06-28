@@ -12,7 +12,7 @@ mycode --model minimax-3
     ↓
 Claude Code
     ↓
-ANTHROPIC_BASE_URL=http://genmachine:3566
+ANTHROPIC_BASE_URL=http://127.0.0.1:3566
     ↓
 Tailscale
     ↓

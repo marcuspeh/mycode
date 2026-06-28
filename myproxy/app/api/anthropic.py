@@ -33,6 +33,9 @@ class ContentBlock(BaseModel):
     name: str | None = None
     id: str | None = None
     input: dict[str, object] | None = None
+    tool_use_id: str | None = None
+    content: str | list[object] | None = None
+    is_error: bool | None = None
 
 
 class Message(BaseModel):
@@ -84,14 +87,9 @@ def _provider_response_to_anthropic(
     pr: ProviderResponse, model: str
 ) -> dict[str, object]:
     """Convert a single ProviderResponse to Anthropic JSON."""
-    content: list[dict[str, object]]
-    try:
-        parsed = json.loads(pr.content)
-        if isinstance(parsed, dict) and "name" in parsed:
-            content = [{"type": "tool_use", **parsed}]
-        else:
-            content = [{"type": "text", "text": pr.content}]
-    except (json.JSONDecodeError, TypeError):
+    if pr.content_blocks:
+        content = pr.content_blocks
+    else:
         content = [{"type": "text", "text": pr.content}]
 
     return _build_anthropic_response(
@@ -160,6 +158,9 @@ async def messages(
                     **({"name": b.name} if b.name is not None else {}),
                     **({"id": b.id} if b.id is not None else {}),
                     **({"input": b.input} if b.input is not None else {}),
+                    **({"tool_use_id": b.tool_use_id} if b.tool_use_id is not None else {}),
+                    **({"content": b.content} if b.content is not None else {}),
+                    **({"is_error": b.is_error} if b.is_error is not None else {}),
                 }
                 for b in msg.content
             ]
@@ -195,8 +196,9 @@ async def messages(
             tools=tools_list,
             stream=request.stream,
         )
-    except Exception:
-        raise HTTPException(status_code=502, detail="Provider error")
+    except Exception as e:
+        logger.exception("provider error: %s", e)
+        raise HTTPException(status_code=502, detail=f"Provider error: {e}")
 
     if not request.stream:
         # Non-streaming: collect the single ProviderResponse

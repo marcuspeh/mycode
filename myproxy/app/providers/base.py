@@ -11,6 +11,7 @@ class ProviderResponse(BaseModel):
     """Unified internal response returned by every provider."""
 
     content: str = ""
+    content_blocks: list[dict[str, object]] = []
     stop_reason: str = "end_turn"
     input_tokens: int = 0
     output_tokens: int = 0

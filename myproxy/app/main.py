@@ -44,3 +44,9 @@ app.include_router(admin_router)
 async def health():
     """Basic health check."""
     return {"status": "ok"}
+
+
+@app.head("/")
+async def root_head():
+    """Root HEAD probe used by Claude Code to validate the base URL."""
+    return {}

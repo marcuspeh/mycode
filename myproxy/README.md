@@ -45,7 +45,10 @@ models:
 
 ## Development
 
+### Using uv
+
 ```bash
-pip install -e ".[dev]"
-pytest tests/
+uv sync
+uv run myproxy
 ```
+

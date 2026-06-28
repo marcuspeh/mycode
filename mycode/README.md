@@ -24,7 +24,7 @@ mycode --base-url http://192.168.1.100:3566
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ANTHROPIC_BASE_URL` | `http://genmachine:3566` | myproxy server URL |
+| `ANTHROPIC_BASE_URL` | `http://127.0.0.1:3566` | myproxy server URL |
 | `ANTHROPIC_MODEL` | `claude-{model}` | Model name sent to proxy |
 | `MYCODE_MACHINE` | hostname | Machine identifier |
 | `CLAUDE_BIN` | `claude` | Path to claude binary |
@@ -32,7 +32,8 @@ mycode --base-url http://192.168.1.100:3566
 ## Install
 
 ```bash
-pip install -e .
+uv sync
+uv run mycode
 ```
 
 The interactive picker requires `questionary` (installed automatically with the package).

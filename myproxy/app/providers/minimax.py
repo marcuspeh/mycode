@@ -46,6 +46,7 @@ class MiniMaxProvider(Provider):
         headers = {
             "x-api-key": self._api_key,
             "Content-Type": "application/json",
+            "anthropic-version": "2023-06-01",
         }
 
         async with httpx.AsyncClient(timeout=self._timeout) as client:
@@ -58,7 +59,10 @@ class MiniMaxProvider(Provider):
                     headers=headers,
                     json=payload,
                 )
-                response.raise_for_status()
+                if response.status_code >= 400:
+                    raise RuntimeError(
+                        f"MiniMax {response.status_code}: {response.text}"
+                    )
                 data = response.json()
                 yield self._parse_response(data)
 
@@ -74,26 +78,31 @@ class MiniMaxProvider(Provider):
             headers=headers,
             json=payload,
         ) as resp:
-            resp.raise_for_status()
+            if resp.status_code >= 400:
+                body = await resp.aread()
+                raise RuntimeError(
+                    f"MiniMax {resp.status_code}: {body.decode(errors='replace')}"
+                )
             async for line in resp.aiter_lines():
                 if line:
                     yield line + "\n"
 
     def _parse_response(self, data: dict) -> ProviderResponse:
-        content_blocks: list[dict] = data.get("content", [])
+        content_blocks_raw: list[dict] = data.get("content", [])
         text_parts: list[str] = []
+        content_blocks: list[dict[str, object]] = []
         stop_reason = data.get("stop_reason", "end_turn")
 
-        for block in content_blocks:
+        for block in content_blocks_raw:
             if isinstance(block, dict):
+                content_blocks.append(block)
                 if block.get("type") == "text" and "text" in block:
                     text_parts.append(str(block["text"]))
-                elif block.get("type") == "tool_use":
-                    text_parts.append(json.dumps(block))
 
         usage = data.get("usage", {})
         return ProviderResponse(
             content="\n".join(text_parts),
+            content_blocks=content_blocks,
             stop_reason=stop_reason,
             input_tokens=int(usage.get("input_tokens", 0)),
             output_tokens=int(usage.get("output_tokens", 0)),
