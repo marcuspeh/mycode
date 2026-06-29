@@ -22,7 +22,7 @@ build-backend = "hatchling.build"
 packages = ["."]
 
 [project.scripts]
-mycode = "cli:app"
+mycode = "cli:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

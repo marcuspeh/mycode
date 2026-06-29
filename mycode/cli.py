@@ -110,7 +110,6 @@ def _find_claude() -> str:
     return "claude"
 
 
-@app.callback()
 def main() -> None:
     """Launch Claude Code pointed at myproxy."""
     models = _fetch_models(DEFAULT_BASE_URL)
@@ -159,4 +158,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    app()
+    main()
