@@ -30,6 +30,10 @@ class MiniMaxProvider(Provider):
         temperature: float,
         tools: list[dict[str, object]] | None,
         stream: bool,
+        thinking: dict[str, object] | None = None,
+        top_p: float | None = None,
+        service_tier: str | None = None,
+        tool_choice: dict[str, object] | None = None,
     ) -> AsyncIterator[ProviderResponse | str]:
         payload: dict[str, object] = {
             "model": model,
@@ -42,11 +46,21 @@ class MiniMaxProvider(Provider):
             payload["system"] = system_prompt
         if tools:
             payload["tools"] = tools
+        # MiniMax supports Anthropic-style top_p / service_tier / tool_choice
+        # directly. `thinking` is only meaningful for MiniMax-M3 — the M2.x
+        # family always thinks and ignores the parameter.
+        if top_p is not None:
+            payload["top_p"] = top_p
+        if service_tier:
+            payload["service_tier"] = service_tier
+        if tool_choice:
+            payload["tool_choice"] = tool_choice
+        if thinking and model.startswith("MiniMax-M3"):
+            payload["thinking"] = thinking
 
         headers = {
             "x-api-key": self._api_key,
             "Content-Type": "application/json",
-            "anthropic-version": "2023-06-01",
         }
 
         async with httpx.AsyncClient(timeout=self._timeout) as client:
@@ -106,5 +120,7 @@ class MiniMaxProvider(Provider):
             stop_reason=stop_reason,
             input_tokens=int(usage.get("input_tokens", 0)),
             output_tokens=int(usage.get("output_tokens", 0)),
+            cache_creation_input_tokens=int(usage.get("cache_creation_input_tokens", 0)),
+            cache_read_input_tokens=int(usage.get("cache_read_input_tokens", 0)),
             cost_usd=0.0,  # MiniMax cost calculated by caller
         )

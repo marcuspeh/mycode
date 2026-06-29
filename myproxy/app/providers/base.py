@@ -15,6 +15,8 @@ class ProviderResponse(BaseModel):
     stop_reason: str = "end_turn"
     input_tokens: int = 0
     output_tokens: int = 0
+    cache_creation_input_tokens: int = 0
+    cache_read_input_tokens: int = 0
     cost_usd: float = 0.0
 
 
@@ -31,6 +33,10 @@ class Provider(ABC):
         temperature: float,
         tools: list[dict[str, object]] | None,
         stream: bool,
+        thinking: dict[str, object] | None = None,
+        top_p: float | None = None,
+        service_tier: str | None = None,
+        tool_choice: dict[str, object] | None = None,
     ) -> AsyncIterator[ProviderResponse | str]:
         """Yield complete ProviderResponse objects for non-streaming,
         or raw SSE strings for streaming. Each SSE string should include

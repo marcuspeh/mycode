@@ -36,6 +36,12 @@ class ContentBlock(BaseModel):
     tool_use_id: str | None = None
     content: str | list[object] | None = None
     is_error: bool | None = None
+    # Extended fields used by the Messages spec for multimodal input and
+    # prompt caching. Forwarded through to providers when present.
+    source: dict[str, object] | None = None
+    cache_control: dict[str, object] | None = None
+    thinking: str | None = None
+    signature: str | None = None
 
 
 class Message(BaseModel):
@@ -47,6 +53,11 @@ class ToolDefinition(BaseModel):
     name: str
     description: str = ""
     input_schema: dict[str, object] = Field(default_factory=dict)
+    cache_control: dict[str, object] | None = None
+
+
+class ToolChoice(BaseModel):
+    type: str  # spec allows only "auto" or "none"
 
 
 class MessagesRequest(BaseModel):
@@ -58,6 +69,11 @@ class MessagesRequest(BaseModel):
     stream: bool = False
     tools: list[ToolDefinition] | None = None
     metadata: dict[str, object] | None = None
+    # Spec fields that were previously dropped at this layer.
+    thinking: dict[str, object] | None = None
+    top_p: float | None = None
+    service_tier: str | None = None
+    tool_choice: ToolChoice | None = None
 
 
 # ---- Helper ----
@@ -92,13 +108,19 @@ def _provider_response_to_anthropic(
     else:
         content = [{"type": "text", "text": pr.content}]
 
+    usage: dict[str, int] = {
+        "input_tokens": pr.input_tokens,
+        "output_tokens": pr.output_tokens,
+    }
+    if pr.cache_creation_input_tokens:
+        usage["cache_creation_input_tokens"] = pr.cache_creation_input_tokens
+    if pr.cache_read_input_tokens:
+        usage["cache_read_input_tokens"] = pr.cache_read_input_tokens
+
     return _build_anthropic_response(
         content_blocks=content,
         stop_reason=pr.stop_reason,
-        usage={
-            "input_tokens": pr.input_tokens,
-            "output_tokens": pr.output_tokens,
-        },
+        usage=usage,
         model=model,
     )
 
@@ -106,6 +128,86 @@ def _provider_response_to_anthropic(
 async def _yield_sse_event(event: dict[str, object]) -> str:
     data = json.dumps(event)
     return f"event: {event.get('type', 'message')}\ndata: {data}\n\n"
+
+
+class _SSERewriter:
+    """Rewrite raw upstream SSE lines into Anthropic-spec events.
+
+    Providers may yield:
+
+    - Plain ``data: {json}`` lines (Anthropic-shaped), and we re-frame with
+      ``event: <type>``.
+    - Bare JSON one-per-line (some MiniMax variants), which we promote into
+      ``data:`` lines.
+    - Already fully-framed ``event:`` / ``data:`` pairs, which we forward.
+
+    Unknown event types pass through verbatim.
+    """
+
+    def __init__(self) -> None:
+        self._buffer: str = ""
+        self._current_event: str | None = None
+
+    def feed(self, raw: str) -> list[str]:
+        """Consume a chunk of upstream text and return any complete frames.
+
+        Each returned string is one or more complete ``event: ...\\ndata:
+        ...\\n\\n`` blocks ready to send downstream.
+        """
+        # Normalise line endings and append to buffer.
+        self._buffer += raw.replace("\r\n", "\n")
+
+        out: list[str] = []
+        while "\n\n" in self._buffer:
+            frame, self._buffer = self._buffer.split("\n\n", 1)
+            framed = self._format_frame(frame)
+            if framed:
+                out.append(framed)
+        return out
+
+    def flush(self) -> list[str]:
+        """Emit any trailing partial frame at end-of-stream."""
+        if not self._buffer.strip():
+            return []
+        framed = self._format_frame(self._buffer)
+        self._buffer = ""
+        return [framed] if framed else []
+
+    def _format_frame(self, frame: str) -> str:
+        lines = [ln for ln in frame.split("\n") if ln.strip() != ""]
+        if not lines:
+            return ""
+
+        event_type: str | None = None
+        data_lines: list[str] = []
+
+        for line in lines:
+            if line.startswith("event:"):
+                event_type = line[len("event:"):].strip()
+            elif line.startswith("data:"):
+                data_lines.append(line[len("data:"):].strip())
+            else:
+                # Bare JSON or unknown content. Treat as a data payload.
+                data_lines.append(line.strip())
+
+        if not data_lines:
+            return ""
+
+        data = "\n".join(data_lines)
+
+        # If no explicit event was given but the data parses to JSON with a
+        # 'type' field, use that. Otherwise default to 'message'.
+        if event_type is None:
+            try:
+                parsed = json.loads(data)
+                if isinstance(parsed, dict) and "type" in parsed:
+                    event_type = str(parsed["type"])
+                else:
+                    event_type = "message"
+            except (ValueError, TypeError):
+                event_type = "message"
+
+        return f"event: {event_type}\ndata: {data}\n\n"
 
 
 # ---- Endpoint ----
@@ -161,6 +263,10 @@ async def messages(
                     **({"tool_use_id": b.tool_use_id} if b.tool_use_id is not None else {}),
                     **({"content": b.content} if b.content is not None else {}),
                     **({"is_error": b.is_error} if b.is_error is not None else {}),
+                    **({"source": b.source} if b.source is not None else {}),
+                    **({"cache_control": b.cache_control} if b.cache_control is not None else {}),
+                    **({"thinking": b.thinking} if b.thinking is not None else {}),
+                    **({"signature": b.signature} if b.signature is not None else {}),
                 }
                 for b in msg.content
             ]
@@ -170,7 +276,20 @@ async def messages(
 
     tools_list: list[dict[str, object]] | None = None
     if request.tools:
-        tools_list = [t.model_dump() for t in request.tools]
+        tools_list = []
+        for t in request.tools:
+            td: dict[str, object] = {
+                "name": t.name,
+                "description": t.description,
+                "input_schema": t.input_schema,
+            }
+            if t.cache_control is not None:
+                td["cache_control"] = t.cache_control
+            tools_list.append(td)
+
+    tool_choice_payload: dict[str, object] | None = None
+    if request.tool_choice is not None:
+        tool_choice_payload = {"type": request.tool_choice.type}
 
     # Scrub outbound payload (PII / secrets).
     scrubber = get_scrubber()
@@ -195,6 +314,10 @@ async def messages(
             temperature=request.temperature,
             tools=tools_list,
             stream=request.stream,
+            thinking=request.thinking,
+            top_p=request.top_p,
+            service_tier=request.service_tier,
+            tool_choice=tool_choice_payload,
         )
     except Exception as e:
         logger.exception("provider error: %s", e)
@@ -217,13 +340,22 @@ async def messages(
 
     # Streaming
     async def stream_wrapper() -> AsyncIterator[str]:
+        rewriter = _SSERewriter()
         try:
             async for item in gen_result:
                 if isinstance(item, str):
-                    yield item
+                    for framed in rewriter.feed(item):
+                        yield framed
                 elif isinstance(item, ProviderResponse):
+                    # Flush any pending upstream SSE frames first, then
+                    # emit the final response as a single 'message' event.
+                    for framed in rewriter.flush():
+                        yield framed
                     anthropic_resp = _provider_response_to_anthropic(item, request.model)
                     yield await _yield_sse_event(anthropic_resp)
+            # End of stream — flush any trailing partial frame.
+            for framed in rewriter.flush():
+                yield framed
         except Exception:
             yield f"event: error\ndata: {json.dumps({'error': 'Internal error'})}\n\n"
 

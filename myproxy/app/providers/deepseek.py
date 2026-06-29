@@ -36,6 +36,10 @@ class DeepSeekProvider(Provider):
         temperature: float,
         tools: list[dict[str, object]] | None,
         stream: bool,
+        thinking: dict[str, object] | None = None,
+        top_p: float | None = None,
+        service_tier: str | None = None,
+        tool_choice: dict[str, object] | None = None,
     ) -> AsyncIterator[ProviderResponse | str]:
         payload: dict[str, object] = {
             "model": model,
@@ -48,6 +52,18 @@ class DeepSeekProvider(Provider):
             payload["system"] = system_prompt
         if tools:
             payload["tools"] = tools
+        # DeepSeek's Anthropic-compatible endpoint accepts the same optional
+        # fields as upstream Anthropic, but ignores those it doesn't model
+        # (thinking, top_p, service_tier, tool_choice). Forward them anyway
+        # so provider-side validation sees a faithful client.
+        if top_p is not None:
+            payload["top_p"] = top_p
+        if service_tier:
+            payload["service_tier"] = service_tier
+        if tool_choice:
+            payload["tool_choice"] = tool_choice
+        if thinking:
+            payload["thinking"] = thinking
 
         headers = {
             "x-api-key": self._api_key,
@@ -104,5 +120,7 @@ class DeepSeekProvider(Provider):
             stop_reason=stop_reason,
             input_tokens=int(usage.get("input_tokens", 0)),
             output_tokens=int(usage.get("output_tokens", 0)),
+            cache_creation_input_tokens=int(usage.get("cache_creation_input_tokens", 0)),
+            cache_read_input_tokens=int(usage.get("cache_read_input_tokens", 0)),
             cost_usd=0.0,
         )

@@ -260,3 +260,356 @@ class TestDeepSeekProvider:
         assert result.stop_reason == "end_turn"
         assert result.input_tokens == 20
         assert result.output_tokens == 30
+
+    def test_parse_response_preserves_cache_tokens(self):
+        from app.providers.deepseek import DeepSeekProvider
+
+        provider = DeepSeekProvider("fake-key")
+        data = {
+            "content": [{"type": "text", "text": "ok"}],
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 50,
+                "output_tokens": 10,
+                "cache_creation_input_tokens": 100,
+                "cache_read_input_tokens": 25,
+            },
+        }
+        result = provider._parse_response(data)
+        assert result.cache_creation_input_tokens == 100
+        assert result.cache_read_input_tokens == 25
+
+
+# ---- Spec-conformance tests ----
+
+class TestMiniMaxProviderThinking:
+    def test_thinking_forwarded_for_m3_only(self):
+        """`thinking` should be forwarded only when the resolved model is M3."""
+        import asyncio
+        from unittest.mock import patch
+
+        from app.providers.minimax import MiniMaxProvider
+
+        captured: dict = {}
+
+        async def fake_post(self, url, **kwargs):
+            captured["json"] = kwargs.get("json")
+            return _FakeResponse({
+                "content": [{"type": "text", "text": "ok"}],
+                "usage": {},
+                "stop_reason": "end_turn",
+            })
+
+        provider = MiniMaxProvider("fake-key")
+
+        async def with_capture(model_name):
+            captured.clear()
+            with patch("httpx.AsyncClient.post", new=fake_post):
+                await provider.messages(
+                    model=model_name,
+                    system_prompt=None,
+                    messages=[{"role": "user", "content": "hi"}],
+                    max_tokens=10,
+                    temperature=1.0,
+                    tools=None,
+                    stream=False,
+                    thinking={"type": "adaptive"},
+                ).__anext__()
+
+        # M3 path — thinking forwarded.
+        asyncio.run(with_capture("MiniMax-M3"))
+        assert captured["json"].get("thinking") == {"type": "adaptive"}
+
+        # M2.7 path — thinking stripped (M2.x always thinks).
+        asyncio.run(with_capture("MiniMax-M2.7"))
+        assert "thinking" not in captured["json"]
+
+
+class TestProviderRequestFieldForwarding:
+    """Verify top_p / service_tier / tool_choice reach the provider payload."""
+
+    def test_minimax_payload_includes_top_p_service_tier_tool_choice(self):
+        import asyncio
+        from unittest.mock import patch
+
+        from app.providers.minimax import MiniMaxProvider
+
+        captured: dict = {}
+
+        async def fake_post(self, url, **kwargs):
+            captured["json"] = kwargs.get("json")
+            return _FakeResponse({
+                "content": [{"type": "text", "text": "ok"}],
+                "usage": {},
+                "stop_reason": "end_turn",
+            })
+
+        provider = MiniMaxProvider("fake-key")
+
+        async def run():
+            with patch("httpx.AsyncClient.post", new=fake_post):
+                await provider.messages(
+                    model="MiniMax-M2.7",
+                    system_prompt=None,
+                    messages=[{"role": "user", "content": "hi"}],
+                    max_tokens=10,
+                    temperature=1.0,
+                    tools=None,
+                    stream=False,
+                    top_p=0.5,
+                    service_tier="priority",
+                    tool_choice={"type": "auto"},
+                ).__anext__()
+
+        asyncio.run(run())
+        assert captured["json"]["top_p"] == 0.5
+        assert captured["json"]["service_tier"] == "priority"
+        assert captured["json"]["tool_choice"] == {"type": "auto"}
+
+
+class _FakeResponse:
+    def __init__(self, payload):
+        self._payload = payload
+        self.status_code = 200
+
+    def json(self):
+        return self._payload
+
+    def raise_for_status(self):
+        return None
+
+    @property
+    def text(self):
+        return ""
+
+
+class _StubProviderResponse:
+    content = ""
+    content_blocks: list = []
+    stop_reason = "end_turn"
+    input_tokens = 0
+    output_tokens = 0
+    cost_usd = 0.0
+
+
+class TestSSERewriter:
+    def test_passes_through_anthropic_framed_events(self):
+        from app.api.anthropic import _SSERewriter
+
+        rw = _SSERewriter()
+        frames = rw.feed(
+            "event: message_start\n"
+            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\"}}\n"
+            "\n"
+        )
+        assert len(frames) == 1
+        assert "event: message_start" in frames[0]
+        assert "\"type\":\"message_start\"" in frames[0]
+
+    def test_promotes_bare_json_to_data_line(self):
+        from app.api.anthropic import _SSERewriter
+
+        rw = _SSERewriter()
+        frames = rw.feed('{"type":"content_block_delta","delta":{"text":"hi"}}\n\n')
+        assert len(frames) == 1
+        assert "event: content_block_delta" in frames[0]
+        assert "data: " in frames[0]
+
+    def test_splits_multiple_frames(self):
+        from app.api.anthropic import _SSERewriter
+
+        rw = _SSERewriter()
+        raw = (
+            "event: a\ndata: {\"type\":\"a\"}\n\n"
+            "event: b\ndata: {\"type\":\"b\"}\n\n"
+        )
+        frames = rw.feed(raw)
+        assert len(frames) == 2
+        assert "event: a" in frames[0]
+        assert "event: b" in frames[1]
+
+    def test_handles_chunked_input(self):
+        from app.api.anthropic import _SSERewriter
+
+        rw = _SSERewriter()
+        # First chunk is partial — no terminating \n\n yet.
+        frames_partial = rw.feed('event: ping\ndata: {"type":"pin')
+        assert frames_partial == []
+        frames_done = rw.feed('g"}\n\n')
+        assert len(frames_done) == 1
+        assert "event: ping" in frames_done[0]
+
+    def test_flush_emits_trailing_partial(self):
+        from app.api.anthropic import _SSERewriter
+
+        rw = _SSERewriter()
+        rw.feed('{"type":"message_stop"}')  # no trailing \n\n
+        trailing = rw.flush()
+        assert len(trailing) == 1
+        assert "event: message_stop" in trailing[0]
+
+
+class TestCacheTokensInResponse:
+    """cache_creation_input_tokens / cache_read_input_tokens must surface."""
+
+    @patch("app.api.anthropic.get_provider")
+    @patch("app.api.anthropic.get_registry")
+    def test_cache_tokens_surfaced_in_usage(self, mock_registry, mock_get_provider):
+        from app.providers.base import ProviderResponse
+
+        mock_registry.return_value.get.return_value = ("minimax", "MiniMax-M3", 1000000)
+        mock_provider = MagicMock()
+        mock_provider.messages.return_value = _make_async_gen([
+            ProviderResponse(
+                content="hi",
+                stop_reason="end_turn",
+                input_tokens=100,
+                output_tokens=20,
+                cache_creation_input_tokens=50,
+                cache_read_input_tokens=10,
+            )
+        ])
+        mock_get_provider.return_value = mock_provider
+
+        response = client.post(
+            "/v1/messages",
+            json={
+                "model": "claude-minimax-3",
+                "messages": [{"role": "user", "content": "Hello"}],
+                "max_tokens": 100,
+            },
+        )
+        assert response.status_code == 200
+        usage = response.json()["usage"]
+        assert usage["cache_creation_input_tokens"] == 50
+        assert usage["cache_read_input_tokens"] == 10
+
+
+class TestContentBlockCacheControlPassthrough:
+    """cache_control on a ContentBlock must reach the provider payload."""
+
+    @patch("app.api.anthropic.get_provider")
+    @patch("app.api.anthropic.get_registry")
+    def test_cache_control_reaches_provider(self, mock_registry, mock_get_provider):
+        from app.providers.base import ProviderResponse
+
+        mock_registry.return_value.get.return_value = ("minimax", "MiniMax-M3", 1000000)
+        captured_kwargs: dict = {}
+
+        async def capture(**kwargs):
+            captured_kwargs.update(kwargs)
+            yield ProviderResponse(
+                content="ok",
+                stop_reason="end_turn",
+                input_tokens=1,
+                output_tokens=1,
+            )
+
+        mock_provider = MagicMock()
+        mock_provider.messages.side_effect = capture
+        mock_get_provider.return_value = mock_provider
+
+        response = client.post(
+            "/v1/messages",
+            json={
+                "model": "claude-minimax-3",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": "cached",
+                                "cache_control": {"type": "ephemeral"},
+                            }
+                        ],
+                    }
+                ],
+                "max_tokens": 50,
+            },
+        )
+        assert response.status_code == 200
+        sent = captured_kwargs["messages"][0]["content"][0]
+        assert sent.get("cache_control") == {"type": "ephemeral"}
+
+    @patch("app.api.anthropic.get_provider")
+    @patch("app.api.anthropic.get_registry")
+    def test_image_source_reaches_provider(self, mock_registry, mock_get_provider):
+        from app.providers.base import ProviderResponse
+
+        mock_registry.return_value.get.return_value = ("minimax", "MiniMax-M3", 1000000)
+        captured_kwargs: dict = {}
+
+        async def capture(**kwargs):
+            captured_kwargs.update(kwargs)
+            yield ProviderResponse(
+                content="ok",
+                stop_reason="end_turn",
+                input_tokens=1,
+                output_tokens=1,
+            )
+
+        mock_provider = MagicMock()
+        mock_provider.messages.side_effect = capture
+        mock_get_provider.return_value = mock_provider
+
+        response = client.post(
+            "/v1/messages",
+            json={
+                "model": "claude-minimax-3",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "url",
+                                    "url": "https://example.com/cat.jpg",
+                                },
+                            }
+                        ],
+                    }
+                ],
+                "max_tokens": 50,
+            },
+        )
+        assert response.status_code == 200
+        sent = captured_kwargs["messages"][0]["content"][0]
+        assert sent.get("source") == {
+            "type": "url",
+            "url": "https://example.com/cat.jpg",
+        }
+
+    @patch("app.api.anthropic.get_provider")
+    @patch("app.api.anthropic.get_registry")
+    def test_tool_choice_reaches_provider(self, mock_registry, mock_get_provider):
+        from app.providers.base import ProviderResponse
+
+        mock_registry.return_value.get.return_value = ("minimax", "MiniMax-M3", 1000000)
+        captured_kwargs: dict = {}
+
+        async def capture(**kwargs):
+            captured_kwargs.update(kwargs)
+            yield ProviderResponse(
+                content="ok",
+                stop_reason="end_turn",
+                input_tokens=1,
+                output_tokens=1,
+            )
+
+        mock_provider = MagicMock()
+        mock_provider.messages.side_effect = capture
+        mock_get_provider.return_value = mock_provider
+
+        response = client.post(
+            "/v1/messages",
+            json={
+                "model": "claude-minimax-3",
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 50,
+                "tool_choice": {"type": "none"},
+            },
+        )
+        assert response.status_code == 200
+        assert captured_kwargs["tool_choice"] == {"type": "none"}
