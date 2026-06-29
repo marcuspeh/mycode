@@ -6,6 +6,13 @@ from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def _parse_csv(value: str | None) -> list[str]:
+    """Split a comma-separated env var into a list, dropping blanks."""
+    if not value:
+        return []
+    return [part.strip() for part in value.split(",") if part.strip()]
+
+
 class Settings(BaseSettings):
     """Runtime configuration sourced from environment variables."""
 
@@ -15,9 +22,10 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # Provider API keys (optional: a provider is only enabled if its key is set).
-    MINIMAX_API_KEY: str | None = None
-    DEEPSEEK_API_KEY: str | None = None
+    # Provider API keys. Comma-separated; rotation order follows env order.
+    # A provider is enabled if at least one key is configured.
+    MINIMAX_API_KEYS: str | None = None
+    DEEPSEEK_API_KEYS: str | None = None
 
     # Filesystem layout (relative to project root unless absolute).
     project_root: Path = Path(__file__).resolve().parents[2]
@@ -42,6 +50,16 @@ class Settings(BaseSettings):
         if config_dir_env:
             self.config_dir = Path(config_dir_env)
             self.models_file = self.config_dir / "models.yaml"
+
+    @property
+    def minimax_keys(self) -> list[str]:
+        """List of MiniMax API keys (parsed from MINIMAX_API_KEYS)."""
+        return _parse_csv(self.MINIMAX_API_KEYS)
+
+    @property
+    def deepseek_keys(self) -> list[str]:
+        """List of DeepSeek API keys (parsed from DEEPSEEK_API_KEYS)."""
+        return _parse_csv(self.DEEPSEEK_API_KEYS)
 
 
 # Singleton-style accessor.

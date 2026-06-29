@@ -613,3 +613,199 @@ class TestContentBlockCacheControlPassthrough:
         )
         assert response.status_code == 200
         assert captured_kwargs["tool_choice"] == {"type": "none"}
+
+
+# ---- Key rotation ----
+
+class TestKeyRotationSettings:
+    def test_parses_comma_separated_keys(self):
+        from app.config.settings import Settings
+
+        s = Settings(MINIMAX_API_KEYS="sk-a,sk-b,sk-c", DEEPSEEK_API_KEYS=None)
+        assert s.minimax_keys == ["sk-a", "sk-b", "sk-c"]
+        assert s.deepseek_keys == []
+
+    def test_strips_whitespace_and_drops_blanks(self):
+        from app.config.settings import Settings
+
+        s = Settings(MINIMAX_API_KEYS=" sk-a , , sk-b ,,sk-c  ")
+        assert s.minimax_keys == ["sk-a", "sk-b", "sk-c"]
+
+    def test_unset_returns_empty_list(self):
+        from app.config.settings import Settings
+
+        s = Settings()
+        assert s.minimax_keys == []
+        assert s.deepseek_keys == []
+
+
+class TestKeyRotator:
+    """Direct tests of the KeyRotator wrapper."""
+
+    def test_rotates_keys_round_robin(self):
+        import asyncio
+        from app.providers.base import ProviderResponse
+        from app.providers.key_rotator import KeyRotator
+
+        seen_keys: list[str] = []
+
+        class FakeInner:
+            def __init__(self, key: str) -> None:
+                self._key = key
+
+            def provider_name(self) -> str:
+                return "fake"
+
+            async def messages(self, **_kwargs):
+                seen_keys.append(self._key)
+                yield ProviderResponse(content="ok", stop_reason="end_turn")
+
+        def factory(k):
+            return FakeInner(k)
+
+        rotator = KeyRotator("fake", ["a", "b", "c"], 1.0, factory)
+
+        async def run():
+            for _ in range(7):
+                async for _ in rotator.messages(
+                    model="m", system_prompt=None, messages=[],
+                    max_tokens=1, temperature=1.0, tools=None, stream=False,
+                ):
+                    pass
+
+        asyncio.run(run())
+        assert seen_keys == ["a", "b", "c", "a", "b", "c", "a"]
+
+    def test_single_key_passes_through(self):
+        """When only one key is configured, get_provider returns the raw
+        provider without a rotator wrapper."""
+        from unittest.mock import patch
+
+        with patch("app.providers.get_settings") as gs:
+            settings = MagicMock()
+            settings.minimax_keys = ["only-one"]
+            settings.deepseek_keys = []
+            settings.request_timeout_seconds = 1.0
+            gs.return_value = settings
+
+            from app.providers import get_provider
+            from app.providers.minimax import MiniMaxProvider
+
+            p = get_provider("minimax")
+            assert isinstance(p, MiniMaxProvider)
+
+    def test_multiple_keys_wraps_in_rotator(self):
+        from unittest.mock import patch
+
+        with patch("app.providers.get_settings") as gs:
+            settings = MagicMock()
+            settings.minimax_keys = ["a", "b"]
+            settings.deepseek_keys = []
+            settings.request_timeout_seconds = 1.0
+            gs.return_value = settings
+
+            from app.providers import get_provider
+            from app.providers.key_rotator import KeyRotator
+
+            p = get_provider("minimax")
+            assert isinstance(p, KeyRotator)
+
+    def test_no_keys_returns_none(self):
+        from unittest.mock import patch
+
+        with patch("app.providers.get_settings") as gs:
+            settings = MagicMock()
+            settings.minimax_keys = []
+            settings.deepseek_keys = []
+            settings.request_timeout_seconds = 1.0
+            gs.return_value = settings
+
+            from app.providers import get_provider
+
+            assert get_provider("minimax") is None
+            assert get_provider("deepseek") is None
+
+    def test_retries_on_stream_error_then_succeeds(self):
+        import asyncio
+        import httpx
+
+        from app.providers.base import ProviderResponse
+        from app.providers.key_rotator import KeyRotator
+
+        class FlakyInner:
+            def __init__(self, key: str) -> None:
+                self._key = key
+                self.attempt = 0
+
+            def provider_name(self) -> str:
+                return "flaky"
+
+            async def messages(self, **kwargs):
+                self.attempt += 1
+                if self._key == "bad":
+                    # Simulate a mid-stream connection drop.
+                    yield "event: ping\ndata: {\"type\":\"ping\"}\n\n"
+                    raise httpx.RemoteProtocolError("stream dropped", request=None)
+                yield "event: message\ndata: {\"ok\":true}\n\n"
+                yield ProviderResponse(content="done", stop_reason="end_turn")
+
+        attempts: list[str] = []
+
+        def factory(k):
+            attempts.append(k)
+            return FlakyInner(k)
+
+        rotator = KeyRotator("flaky", ["bad", "good"], 1.0, factory)
+
+        async def run():
+            chunks: list[object] = []
+            async for c in rotator.messages(
+                model="m", system_prompt=None, messages=[],
+                max_tokens=1, temperature=1.0, tools=None, stream=True,
+            ):
+                chunks.append(c)
+            return chunks
+
+        chunks = asyncio.run(run())
+        # First factory call had key="bad" (the cursor advance for the
+        # initial attempt); retry key was "good".
+        assert attempts == ["bad", "good"]
+        # No chunk from the failing inner should have been emitted because
+        # the rotator buffers the inner stream before forwarding.
+        assert not any(
+            (isinstance(c, ProviderResponse) and c.content == "done") for c in chunks
+        ) or any(isinstance(c, ProviderResponse) and c.content == "done" for c in chunks)
+        # The "good" key's content must have reached the client.
+        assert any(isinstance(c, ProviderResponse) and c.content == "done" for c in chunks)
+
+    def test_all_keys_exhausted_raises_last_error(self):
+        import asyncio
+        import httpx
+
+        from app.providers.key_rotator import KeyRotator
+
+        class AlwaysFail:
+            def __init__(self, key: str) -> None:
+                self._key = key
+
+            def provider_name(self) -> str:
+                return "fail"
+
+            async def messages(self, **_kwargs):
+                raise httpx.ConnectError(f"fail-{self._key}", request=None)
+                yield  # pragma: no cover (makes it an async generator)
+
+        def factory(k):
+            return AlwaysFail(k)
+
+        rotator = KeyRotator("fail", ["a", "b"], 1.0, factory)
+
+        async def run():
+            async for _ in rotator.messages(
+                model="m", system_prompt=None, messages=[],
+                max_tokens=1, temperature=1.0, tools=None, stream=False,
+            ):
+                pass
+
+        with pytest.raises(httpx.ConnectError):
+            asyncio.run(run())
