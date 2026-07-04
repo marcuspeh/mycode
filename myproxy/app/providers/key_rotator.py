@@ -57,6 +57,24 @@ class KeyRotator(Provider):
         self._factory = factory
         self._idx = 0
         self._lock = threading.Lock()
+        # Optional callback invoked with each key we try on this request.
+        # Set by the request observer so trace lines can report which key
+        # actually handled the call (and how many retries happened).
+        self._on_key: Callable[[str], None] | None = None
+
+    @property
+    def key_count(self) -> int:
+        """Number of keys in the rotation pool (for observability)."""
+        return len(self._keys)
+
+    def set_on_key(self, callback: Callable[[str], None] | None) -> None:
+        """Register (or clear) a per-attempt key callback.
+
+        The observer uses this to attribute each request to the key that
+        ultimately returned data — solving "which key did this come from?"
+        from issue 2.
+        """
+        self._on_key = callback
 
     def provider_name(self) -> str:
         return self._name
@@ -95,6 +113,8 @@ class KeyRotator(Provider):
         last_error: BaseException | None = None
         for attempt in range(len(self._keys)):
             key = self._key_for_attempt(start, attempt)
+            if self._on_key is not None:
+                self._on_key(key)
             inner = self._factory(key)
             try:
                 if stream:

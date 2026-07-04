@@ -55,8 +55,9 @@ def _make_async_gen(items: list):
 class TestModelRegistry:
     def test_loads_models(self, temp_models_file: Path):
         registry = ModelRegistry(temp_models_file)
-        assert registry.get("claude-minimax-3") == ("minimax", "MiniMax-M1")
-        assert registry.get("claude-deepseek3") == ("deepseek", "deepseek-chat")
+        # ``context_length`` defaults to 0 when not declared in models.yaml.
+        assert registry.get("claude-minimax-3") == ("minimax", "MiniMax-M1", 0)
+        assert registry.get("claude-deepseek3") == ("deepseek", "deepseek-chat", 0)
 
     def test_unknown_model_returns_none(self, temp_models_file: Path):
         registry = ModelRegistry(temp_models_file)
@@ -80,7 +81,7 @@ models:
 """
         temp_models_file.write_text(new_content)
 
-        assert registry.get("claude-new-model") == ("minimax", "MiniMax-2.7")
+        assert registry.get("claude-new-model") == ("minimax", "MiniMax-2.7", 0)
         assert registry.get("claude-deepseek3") is None
 
     def test_missing_file(self):
@@ -126,7 +127,7 @@ class TestMessagesEndpoint:
     @patch("app.api.anthropic.get_provider")
     @patch("app.api.anthropic.get_registry")
     def test_missing_provider_key_returns_400(self, mock_registry, mock_get_provider):
-        mock_registry.return_value.get.return_value = ("deepseek", "deepseek-chat")
+        mock_registry.return_value.get.return_value = ("deepseek", "deepseek-chat", 0)
         mock_get_provider.return_value = None
 
         response = client.post(
@@ -146,7 +147,7 @@ class TestMessagesEndpoint:
     ):
         from app.providers.base import ProviderResponse
 
-        mock_registry.return_value.get.return_value = ("minimax", "MiniMax-M1")
+        mock_registry.return_value.get.return_value = ("minimax", "MiniMax-M1", 0)
         mock_provider = MagicMock()
         mock_provider.messages.return_value = _make_async_gen([
             ProviderResponse(
@@ -181,7 +182,7 @@ class TestMessagesEndpoint:
     def test_streaming_request(self, mock_registry, mock_get_provider):
         from app.providers.base import ProviderResponse
 
-        mock_registry.return_value.get.return_value = ("minimax", "MiniMax-M1")
+        mock_registry.return_value.get.return_value = ("minimax", "MiniMax-M1", 0)
         mock_provider = MagicMock()
         mock_provider.messages.return_value = _make_async_gen([
             "data: {\"type\":\"content_block_delta\"}\n\n",
@@ -230,7 +231,9 @@ class TestMiniMaxProvider:
         }
         result = provider._parse_response(data)
         assert "Hello world" in result.content
-        assert "tool_use" in result.content
+        # tool_use blocks land in ``content_blocks`` (the structured form),
+        # not the joined-text ``content`` field.
+        assert any(b.get("type") == "tool_use" for b in result.content_blocks)
         assert result.stop_reason == "end_turn"
         assert result.input_tokens == 100
         assert result.output_tokens == 50
@@ -256,7 +259,9 @@ class TestDeepSeekProvider:
         }
         result = provider._parse_response(data)
         assert "Hello from DeepSeek" in result.content
-        assert "tool_use" in result.content
+        # tool_use blocks land in ``content_blocks`` (the structured form),
+        # not the joined-text ``content`` field.
+        assert any(b.get("type") == "tool_use" for b in result.content_blocks)
         assert result.stop_reason == "end_turn"
         assert result.input_tokens == 20
         assert result.output_tokens == 30

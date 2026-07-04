@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 import logging
-import time
 import uuid
 from typing import AsyncIterator
 
@@ -15,8 +14,10 @@ from fastapi import APIRouter, HTTPException, Request as FastAPIRequest
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
+from app.observability import get_observer
 from app.providers import get_provider
 from app.providers.base import ProviderResponse
+from app.providers.key_rotator import KeyRotator
 from app.registry.model_registry import get_registry
 from app.scrubber import get_scrubber
 
@@ -218,11 +219,23 @@ async def messages(
     request: MessagesRequest,
 ):
     """Anthropic-compatible Messages endpoint."""
+    observer = get_observer()
+    # Honor an inbound ``X-Request-Id`` so clients can correlate logs; mint
+    # one otherwise. Both paths land in the response header and the trace
+    # line (issue 2).
+    inbound_rid = fastapi_request.headers.get("x-request-id")
+    obs = observer.begin(
+        model_alias=request.model,
+        stream=request.stream,
+        request_id=inbound_rid,
+    )
+
     registry = get_registry()
 
     # Resolve model
     resolved = registry.get(request.model)
     if resolved is None:
+        observer.finish_error(obs, 400, f"unknown model: {request.model}")
         raise HTTPException(
             status_code=400,
             detail=f"Unknown model: {request.model}",
@@ -231,10 +244,25 @@ async def messages(
     provider_name, actual_model, context_length = resolved
     provider = get_provider(provider_name)
     if provider is None:
+        observer.finish_error(obs, 400, f"provider not configured: {provider_name}")
         raise HTTPException(
             status_code=400,
             detail=f"Provider '{provider_name}' not configured (missing API key)",
         )
+
+    # Record which provider / pool size we're routing to. If the provider
+    # is a KeyRotator we also hook the per-attempt callback so the trace
+    # line and rollup can attribute the request to whichever key finally
+    # returned data.
+    key_total = provider.key_count if isinstance(provider, KeyRotator) else None
+    observer.set_provider(obs, provider_name, None, key_total)
+    on_key_cb = (
+        (lambda key, o=obs: observer.record_attempt(o, key))
+        if isinstance(provider, KeyRotator)
+        else None
+    )
+    if on_key_cb is not None:
+        provider.set_on_key(on_key_cb)
 
     # Extract system prompt
     system_text: str | None = None
@@ -304,7 +332,6 @@ async def messages(
         logger.info("scrubbed", extra={"event_count": len(scrub_result.events)})
 
     # Call provider
-    t0 = time.monotonic()
     try:
         gen_result = provider.messages(
             model=actual_model,
@@ -320,26 +347,52 @@ async def messages(
             tool_choice=tool_choice_payload,
         )
     except Exception as e:
+        if on_key_cb is not None:
+            provider.set_on_key(None)
+        observer.finish_error(obs, 502, f"provider invocation failed: {e}")
         logger.exception("provider error: %s", e)
         raise HTTPException(status_code=502, detail=f"Provider error: {e}")
 
     if not request.stream:
         # Non-streaming: collect the single ProviderResponse
-        pr = await gen_result.__anext__()
-        latency_ms = (time.monotonic() - t0) * 1000
+        try:
+            pr = await gen_result.__anext__()
+        except StopAsyncIteration:
+            if on_key_cb is not None:
+                provider.set_on_key(None)
+            observer.finish_error(obs, 502, "provider returned no response")
+            raise HTTPException(status_code=502, detail="Provider returned no response")
+        except Exception as e:
+            if on_key_cb is not None:
+                provider.set_on_key(None)
+            observer.finish_error(obs, 502, f"provider error: {e}")
+            logger.exception("provider error: %s", e)
+            raise HTTPException(status_code=502, detail=f"Provider error: {e}")
+
+        if on_key_cb is not None:
+            provider.set_on_key(None)
 
         if not isinstance(pr, ProviderResponse):
+            observer.finish_error(obs, 500, "unexpected provider response type")
             raise HTTPException(status_code=500, detail="Unexpected provider response")
 
+        observer.finish_success(obs, 200, pr)
         anthropic_resp = _provider_response_to_anthropic(pr, request.model)
-        from fastapi.responses import JSONResponse
         return JSONResponse(
             content=anthropic_resp,
-            headers={"X-Context-Length": str(context_length)},
+            headers={
+                "X-Context-Length": str(context_length),
+                "X-Request-Id": obs.request_id,
+                "X-Latency-Ms": f"{obs.latency_ms:.3f}",
+            },
         )
 
     # Streaming
+    final_pr: ProviderResponse | None = None
+    stream_error: str | None = None
+
     async def stream_wrapper() -> AsyncIterator[str]:
+        nonlocal final_pr, stream_error
         rewriter = _SSERewriter()
         try:
             async for item in gen_result:
@@ -351,13 +404,26 @@ async def messages(
                     # emit the final response as a single 'message' event.
                     for framed in rewriter.flush():
                         yield framed
+                    final_pr = item
                     anthropic_resp = _provider_response_to_anthropic(item, request.model)
                     yield await _yield_sse_event(anthropic_resp)
             # End of stream — flush any trailing partial frame.
             for framed in rewriter.flush():
                 yield framed
-        except Exception:
+        except Exception as e:
+            stream_error = str(e)
             yield f"event: error\ndata: {json.dumps({'error': 'Internal error'})}\n\n"
+        finally:
+            # Always tear down the key callback + commit the trace line,
+            # even if the client disconnected mid-stream.
+            if on_key_cb is not None:
+                provider.set_on_key(None)
+            if final_pr is not None:
+                observer.finish_success(obs, 200, final_pr)
+            elif stream_error is not None:
+                observer.finish_error(obs, 500, f"stream error: {stream_error}")
+            elif not obs.finished:
+                observer.finish_error(obs, 500, "stream ended without provider response")
 
     return StreamingResponse(
         stream_wrapper(),
@@ -366,5 +432,6 @@ async def messages(
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
             "X-Context-Length": str(context_length),
+            "X-Request-Id": obs.request_id,
         },
     )

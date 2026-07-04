@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     # Scrubber.
     scrub_enabled: bool = True
 
+    # Observability
+    trace_enabled: bool = True
+    trace_file: Path | None = None
+
     def model_post_init(self, _ctx: object) -> None:
         """Resolve runtime paths."""
         import os
@@ -50,6 +54,9 @@ class Settings(BaseSettings):
         if config_dir_env:
             self.config_dir = Path(config_dir_env)
             self.models_file = self.config_dir / "models.yaml"
+
+        if self.trace_file is None:
+            self.trace_file = self.project_root / "logs" / "myproxy.jsonl"
 
     @property
     def minimax_keys(self) -> list[str]:
