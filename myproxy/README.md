@@ -4,12 +4,43 @@ Anthropic-compatible proxy server for MiniMax and DeepSeek.
 
 ## Setup
 
+Everything is configured through a `.env` file in this directory. Copy the
+template and fill in your provider keys:
+
 ```bash
 cp .env.example .env
-# Add your API key(s) to .env
-
-docker compose up -d
+$EDITOR .env
 ```
+
+```bash
+# .env
+MINIMAX_API_KEYS=sk-your-minimax-key
+DEEPSEEK_API_KEYS=sk-your-deepseek-key
+```
+
+`MINIMAX_API_KEYS` and `DEEPSEEK_API_KEYS` are comma-separated lists — the
+proxy round-robins across them. A provider is enabled only when its list is
+non-empty, so you can set one and leave the other blank.
+
+Then start the server:
+
+```bash
+docker compose up -d     # container
+# or
+uv run myproxy           # local
+```
+
+Verify it came up:
+
+```bash
+curl http://127.0.0.1:3566/health
+curl http://127.0.0.1:3566/admin/models
+```
+
+The `.env` file is read directly by the app when running locally, and by
+`docker compose` via `env_file` when running in a container. Only the
+variables listed in the table below have an effect — anything else in the
+file is ignored.
 
 ## Endpoints
 

@@ -383,6 +383,41 @@ class TestAnthropicCompatibility:
         assert captured["tool_choice"] == {"type": "auto"}
 
 
+class TestDockerComposeEnvWiring:
+    """The container must pass the env var names the app actually reads."""
+
+    def _compose_env(self) -> dict[str, str]:
+        import re
+        from pathlib import Path
+
+        compose = Path(__file__).resolve().parents[1] / "docker-compose.yml"
+        text = compose.read_text()
+        env_block = re.search(r"environment:\n((?:\s+-.*\n)+)", text)
+        assert env_block, "no environment block in docker-compose.yml"
+        names = re.findall(r"-\s+([A-Z_]+)=", env_block.group(1))
+        return {n: n for n in names}
+
+    def test_compose_passes_the_plural_key_names(self):
+        from app.config.settings import Settings
+
+        fields = set(Settings.model_fields)
+        for name in self._compose_env():
+            assert name in fields, (
+                f"docker-compose.yml sets {name} but Settings has no such field"
+            )
+
+    def test_compose_includes_provider_keys(self):
+        names = self._compose_env()
+        assert "MINIMAX_API_KEYS" in names
+        assert "DEEPSEEK_API_KEYS" in names
+
+    def test_compose_declares_env_file(self):
+        from pathlib import Path
+
+        compose = Path(__file__).resolve().parents[1] / "docker-compose.yml"
+        assert "env_file:" in compose.read_text()
+
+
 # ---- Provider Response Parsing Tests ----
 
 class TestMiniMaxProvider:

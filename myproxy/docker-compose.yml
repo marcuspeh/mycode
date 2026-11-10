@@ -8,8 +8,10 @@ services:
     ports:
       - "3566:3566"
     environment:
-      - MINIMAX_API_KEY=${MINIMAX_API_KEY:-}
-      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+      - MINIMAX_API_KEYS=${MINIMAX_API_KEYS:-}
+      - DEEPSEEK_API_KEYS=${DEEPSEEK_API_KEYS:-}
+    env_file:
+      - .env
     volumes:
       - ./config:/app/config
       - ./logs:/app/logs
