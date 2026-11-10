@@ -534,8 +534,16 @@ class TestMiniMaxProviderThinking:
         asyncio.run(with_capture("MiniMax-M3"))
         assert captured["json"].get("thinking") == {"type": "adaptive"}
 
+        # M3.1-Flash path — thinking forwarded (M3 family).
+        asyncio.run(with_capture("MiniMax-M3.1-Flash"))
+        assert captured["json"].get("thinking") == {"type": "adaptive"}
+
         # M2.7 path — thinking stripped (M2.x always thinks).
         asyncio.run(with_capture("MiniMax-M2.7"))
+        assert "thinking" not in captured["json"]
+
+        # M2.7-highspeed path — thinking stripped.
+        asyncio.run(with_capture("MiniMax-M2.7-highspeed"))
         assert "thinking" not in captured["json"]
 
 

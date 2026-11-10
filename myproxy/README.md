@@ -97,9 +97,10 @@ The `/v1/messages` endpoint accepts the full Anthropic Messages request shape an
 | `model`, `messages`, `system`, `max_tokens`, `temperature`, `stream` | Always forwarded |
 | `tools`, `tool_choice` | Forwarded; `tool_choice` is restricted to `auto` / `none` per spec |
 | `top_p`, `service_tier` | Forwarded when set |
-| `thinking` | Forwarded to MiniMax only for `MiniMax-M3`; ignored otherwise (M2.x always thinks) |
+| `thinking` | Forwarded to MiniMax for the `MiniMax-M3` family (`MiniMax-M3`, `MiniMax-M3.1-Flash`); dropped for M2.x, which always thinks |
+| `output_config.effort` | Not forwarded — M3.1-Flash thinking depth is not tunable through this proxy |
 | `cache_control` | Preserved on content blocks, system blocks, and tool definitions |
-| `source` (image / video) | Preserved on content blocks (MiniMax-M3 only) |
+| `source` (image / video) | Preserved on content blocks (M3 family only) |
 | `metadata.user_id` | Forwarded as-is |
 
 The response side preserves the full usage block: `input_tokens`, `output_tokens`, `cache_creation_input_tokens`, `cache_read_input_tokens`.
@@ -128,10 +129,11 @@ Currently registered:
 | Alias | Provider | Upstream model | Context |
 |-------|----------|----------------|---------|
 | `claude-lb-minimax-m3` | minimax | `MiniMax-M3` | 1M |
+| `claude-lb-minimax-m3.1-flash` | minimax | `MiniMax-M3.1-Flash` | 1M |
 | `claude-lb-minimax-m2.7` | minimax | `MiniMax-M2.7` | 200K |
 | `claude-lb-minimax-m2.7-flash` | minimax | `MiniMax-M2.7-highspeed` | 200K |
 | `claude-lb-deepseek-v4-pro` | deepseek | `deepseek-v4-pro` | 1M |
-| `claude-lb-deepseek-v4-flash` | deepseek | `deepseek-v4-flash` | 1M |
+| `claude-lb-deepseek-flash` | deepseek | `deepseek-flash` | 1M |
 
 The `context_length` field is informational — it's exposed via the `X-Context-Length` response header so clients can budget their requests.
 

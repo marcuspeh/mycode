@@ -37,8 +37,9 @@ class MiniMaxProvider(Provider):
         tool_choice: dict[str, object] | None = None,
     ) -> dict[str, object]:
         """MiniMax supports Anthropic-style top_p / service_tier / tool_choice
-        directly. `thinking` is only meaningful for MiniMax-M3 — the M2.x
-        family always thinks and ignores the parameter.
+        directly. `thinking` is only meaningful for the M3 family
+        (`MiniMax-M3`, `MiniMax-M3.1-Flash`) — the M2.x family always thinks
+        and ignores the parameter.
         """
         if thinking and not model.startswith("MiniMax-M3"):
             thinking = None
