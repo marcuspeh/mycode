@@ -7,26 +7,25 @@ via myproxy.
 ## Usage
 
 ```bash
-# Interactive: fetch available models and pick with arrow keys
+# Interactive picker — fetches the model list from myproxy, then asks
+# which model to use for opus / sonnet / haiku
 mycode
 
-# Or pass --model directly to skip the picker
-mycode --model minimax-3
-
 # Extra args are forwarded to claude code
-mycode --model minimax-3 --debug --some-flag=value
-
-# Custom myproxy server
-mycode --base-url http://192.168.1.100:3566
+mycode --debug --some-flag=value
 ```
+
+The picker runs three times, once per slot, and each selection is
+exported as the matching `ANTHROPIC_DEFAULT_*_MODEL` variable.
 
 ## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `ANTHROPIC_BASE_URL` | `http://127.0.0.1:3566` | myproxy server URL |
-| `ANTHROPIC_MODEL` | `claude-{model}` | Model name sent to proxy |
 | `CLAUDE_BIN` | `claude` | Path to claude binary |
+
+The proxy URL is currently fixed to `http://127.0.0.1:3566`.
 
 ## Install
 

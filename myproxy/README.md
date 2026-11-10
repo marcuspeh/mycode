@@ -123,6 +123,16 @@ models:
     context_length: 1000000
 ```
 
+Currently registered:
+
+| Alias | Provider | Upstream model | Context |
+|-------|----------|----------------|---------|
+| `claude-lb-minimax-m3` | minimax | `MiniMax-M3` | 1M |
+| `claude-lb-minimax-m2.7` | minimax | `MiniMax-M2.7` | 200K |
+| `claude-lb-minimax-m2.7-flash` | minimax | `MiniMax-M2.7-highspeed` | 200K |
+| `claude-lb-deepseek-v4-pro` | deepseek | `deepseek-v4-pro` | 1M |
+| `claude-lb-deepseek-v4-flash` | deepseek | `deepseek-v4-flash` | 1M |
+
 The `context_length` field is informational — it's exposed via the `X-Context-Length` response header so clients can budget their requests.
 
 ## Environment Variables

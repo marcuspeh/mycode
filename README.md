@@ -8,7 +8,7 @@ with MiniMax or DeepSeek via a simple Anthropic-compatible proxy.
 ```
 Macbook / Laptop
     ↓
-mycode --model minimax-3
+mycode
     ↓
 Claude Code
     ↓
@@ -38,12 +38,17 @@ docker compose up -d
 ### Client (Macbook / Laptop)
 
 ```bash
-# Interactive picker — fetches available models from myproxy
+# Interactive picker — fetches the model list from myproxy and asks
+# which model to use for opus / sonnet / haiku
 mycode
+```
 
-# Or pick directly
-mycode --model minimax-m3
-mycode --model deepseek-v4-pro
+The picker runs three times, once per slot. Pick a model for each, then
+Claude Code launches against the proxy. Extra arguments are forwarded
+to `claude` unchanged:
+
+```bash
+mycode --debug
 ```
 
 ## Project Structure
