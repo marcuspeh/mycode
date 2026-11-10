@@ -16,9 +16,46 @@ docker compose up -d
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/v1/messages` | Anthropic Messages API |
+| `GET` | `/v1/models` | List models (Anthropic `/v1/models` format) |
 | `GET` | `/admin/models` | List configured models |
 | `POST` | `/admin/reload` | Hot-reload models.yaml |
+| `GET` | `/admin/stats` | Per-request rollups (tokens, cost, latency) |
+| `GET` | `/admin/recent` | Tail of recent request trace lines |
 | `GET` | `/health` | Health check |
+
+## Using with Trae (custom model)
+
+Trae's **Settings → Models → Add Model → Custom Model** can point at this
+proxy. Choose **API Format: Anthropic Messages** — Trae then appends
+`/v1/messages` to the URL you provide.
+
+| Field | Value |
+|-------|-------|
+| API Format | Anthropic Messages |
+| Custom Request URL | `http://<proxy-host>:3566` (Full URL **off**) — Trae appends `/v1/messages` |
+| Model ID | A registry alias, e.g. `claude-lb-minimax-m3` |
+| API Key | Any non-empty value — the proxy authenticates to the upstream provider, not the client |
+
+With **Full URL** on, use `http://<proxy-host>:3566/v1/messages` instead.
+
+The proxy ignores the client's `x-api-key` and `anthropic-version` headers,
+so any placeholder key works.
+
+Notes:
+
+- Trae streams by default. The proxy emits Anthropic-spec SSE frames
+  (`message_start`, `content_block_start`, `content_block_delta`,
+  `message_delta`, `message_stop`), one JSON payload per frame.
+- `tool_choice` supports `auto`, `any`, `none` and `tool` (with `name`).
+- `GET /v1/models` lists the registry aliases so clients that probe for
+  models find them.
+- Trae's Anthropic client sends `x-api-key` and `anthropic-version`
+  headers; the proxy ignores both and authenticates to the upstream
+  provider with its own key, so any placeholder key works.
+- Trae runs the model call from the local IDE process, so the proxy only
+  needs to be reachable from the machine running Trae — `127.0.0.1` or
+  the Tailscale address of the proxy host both work. Check the traffic
+  log (`logs/myproxy-traffic.txt`) to see the connecting host.
 
 ## Supported request features
 

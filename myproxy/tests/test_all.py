@@ -1,6 +1,7 @@
 """Tests for myproxy."""
 from __future__ import annotations
 
+import json
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -207,6 +208,179 @@ class TestMessagesEndpoint:
         )
         assert response.status_code == 200
         assert "text/event-stream" in response.headers.get("content-type", "")
+
+
+class TestProviderSSEFraming:
+    """Upstream SSE frames must reach the client as separate frames.
+
+    Blank lines are the SSE frame separators. A provider that drops them
+    makes the whole stream collapse into one frame whose ``data:`` field
+    holds several concatenated JSON objects — which strict Anthropic
+    clients (Trae, Claude Code) cannot parse.
+    """
+
+    UPSTREAM = (
+        'event: message_start\ndata: {"type":"message_start","message":'
+        '{"id":"m1","usage":{"input_tokens":7}}}\n\n'
+        'event: content_block_delta\ndata: {"type":"content_block_delta",'
+        '"index":0,"delta":{"type":"text_delta","text":"hello"}}\n\n'
+        'event: message_stop\ndata: {"type":"message_stop"}\n\n'
+    )
+
+    @staticmethod
+    def _collect(provider):
+        """Run provider._stream against a fake upstream and collect its output."""
+        import asyncio
+
+        upstream = TestProviderSSEFraming.UPSTREAM
+
+        class _Resp:
+            status_code = 200
+
+            def raise_for_status(self):
+                return None
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def aiter_lines(self):
+                for line in upstream.split("\n"):
+                    yield line
+
+        class _Client:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            def stream(self, *args, **kwargs):
+                return _Resp()
+
+        async def run():
+            out = []
+            async for chunk in provider._stream(_Client(), {}, {}):
+                out.append(chunk)
+            return out
+
+        return asyncio.run(run())
+
+    def test_minimax_preserves_blank_line_separators(self):
+        from app.providers.minimax import MiniMaxProvider
+
+        chunks = self._collect(MiniMaxProvider("fake-key"))
+        joined = "".join(chunks)
+        # The blank line between frames must survive the provider.
+        # Three frames => two separators, plus the trailing newline of the
+        # last frame (the upstream body ends with a newline).
+        assert joined.count("\n\n") == 3
+
+    def test_deepseek_preserves_blank_line_separators(self):
+        from app.providers.deepseek import DeepSeekProvider
+
+        chunks = self._collect(DeepSeekProvider("fake-key"))
+        joined = "".join(chunks)
+        assert joined.count("\n\n") == 3
+
+    def test_upstream_frames_reach_client_separately(self):
+        """End-to-end: the client sees one frame per upstream event."""
+        from app.api.anthropic import _SSERewriter
+
+        rewriter = _SSERewriter()
+        frames: list[str] = []
+        # This is exactly what a provider yields once blank lines are kept.
+        for line in self.UPSTREAM.split("\n"):
+            frames.extend(rewriter.feed(line + "\n"))
+        frames.extend(rewriter.flush())
+
+        assert len(frames) == 3
+        for frame in frames:
+            lines = [ln for ln in frame.split("\n") if ln.strip()]
+            data = "\n".join(
+                ln[len("data:"):].strip() for ln in lines if ln.startswith("data:")
+            )
+            # Each frame carries exactly one JSON payload.
+            assert json.loads(data)
+
+
+class TestAnthropicCompatibility:
+    """Endpoints and fields Anthropic-compatible clients rely on."""
+
+    def test_v1_models_lists_registry_entries(self):
+        response = client.get("/v1/models")
+        assert response.status_code == 200
+        data = response.json()
+        assert "data" in data
+        ids = [m["id"] for m in data["data"]]
+        assert "claude-lb-minimax-m3" in ids
+        for model in data["data"]:
+            assert model["type"] == "model"
+            assert model["id"]
+            assert "created_at" in model
+
+    @patch("app.api.anthropic.get_provider")
+    @patch("app.api.anthropic.get_registry")
+    def test_tool_choice_with_tool_name_is_forwarded(
+        self, mock_registry, mock_get_provider,
+    ):
+        from app.providers.base import ProviderResponse
+
+        mock_registry.return_value.get.return_value = ("minimax", "MiniMax-M3", 1000000)
+        captured: dict = {}
+
+        async def capture(**kwargs):
+            captured.update(kwargs)
+            yield ProviderResponse(content="ok", stop_reason="end_turn")
+
+        mock_provider = MagicMock()
+        mock_provider.build_payload.side_effect = lambda **kw: {"model": kw["model"]}
+        mock_provider.messages.side_effect = capture
+        mock_get_provider.return_value = mock_provider
+
+        response = client.post(
+            "/v1/messages",
+            json={
+                "model": "claude-minimax-3",
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 10,
+                "tool_choice": {"type": "tool", "name": "read_file"},
+            },
+        )
+        assert response.status_code == 200
+        assert captured["tool_choice"] == {"type": "tool", "name": "read_file"}
+
+    @patch("app.api.anthropic.get_provider")
+    @patch("app.api.anthropic.get_registry")
+    def test_tool_choice_auto_has_no_name(
+        self, mock_registry, mock_get_provider,
+    ):
+        from app.providers.base import ProviderResponse
+
+        mock_registry.return_value.get.return_value = ("minimax", "MiniMax-M3", 1000000)
+        captured: dict = {}
+
+        async def capture(**kwargs):
+            captured.update(kwargs)
+            yield ProviderResponse(content="ok", stop_reason="end_turn")
+
+        mock_provider = MagicMock()
+        mock_provider.build_payload.side_effect = lambda **kw: {"model": kw["model"]}
+        mock_provider.messages.side_effect = capture
+        mock_get_provider.return_value = mock_provider
+
+        client.post(
+            "/v1/messages",
+            json={
+                "model": "claude-minimax-3",
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 10,
+                "tool_choice": {"type": "auto"},
+            },
+        )
+        assert captured["tool_choice"] == {"type": "auto"}
 
 
 # ---- Provider Response Parsing Tests ----

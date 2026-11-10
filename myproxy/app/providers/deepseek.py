@@ -92,8 +92,9 @@ class DeepSeekProvider(Provider):
         ) as resp:
             resp.raise_for_status()
             async for line in resp.aiter_lines():
-                if line:
-                    yield line + "\n"
+                # Blank lines are the SSE frame separators — dropping them
+                # would merge every upstream event into one frame.
+                yield line + "\n"
 
     def _parse_response(self, data: dict) -> ProviderResponse:
         content_blocks_raw: list[dict] = data.get("content", [])

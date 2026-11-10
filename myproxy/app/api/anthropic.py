@@ -59,7 +59,8 @@ class ToolDefinition(BaseModel):
 
 
 class ToolChoice(BaseModel):
-    type: str  # spec allows only "auto" or "none"
+    type: str  # auto | any | none | tool
+    name: str | None = None  # required when type == "tool"
 
 
 class MessagesRequest(BaseModel):
@@ -408,6 +409,31 @@ def _log_rejected(
 
 # ---- Endpoint ----
 
+@router.get("/models")
+async def list_models() -> dict[str, object]:
+    """List models in the Anthropic ``/v1/models`` format.
+
+    Anthropic-compatible clients (Trae's custom model setup, Anthropic
+    SDKs) probe this endpoint to discover available models and to verify
+    that an API key works before the first chat request.
+    """
+    registry = get_registry()
+    return {
+        "data": [
+            {
+                "type": "model",
+                "id": alias,
+                "display_name": spec.get("model", alias),
+                "created_at": "2024-01-01T00:00:00Z",
+            }
+            for alias, spec in registry.list_models().items()
+        ],
+        "has_more": False,
+        "first_id": next(iter(registry.list_models()), None),
+        "last_id": next(reversed(list(registry.list_models())), None),
+    }
+
+
 @router.post("/messages", response_model=None)
 async def messages(
     fastapi_request: FastAPIRequest,
@@ -515,6 +541,8 @@ async def messages(
     tool_choice_payload: dict[str, object] | None = None
     if request.tool_choice is not None:
         tool_choice_payload = {"type": request.tool_choice.type}
+        if request.tool_choice.name is not None:
+            tool_choice_payload["name"] = request.tool_choice.name
 
     # Scrub outbound payload (PII / secrets).
     scrubber = get_scrubber()
