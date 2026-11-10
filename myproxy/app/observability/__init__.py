@@ -11,10 +11,18 @@ from app.observability.observer import (
     get_observer,
     reset_observer,
 )
+from app.observability.payload_log import (
+    PayloadLogger,
+    get_payload_logger,
+    reset_payload_logger,
+)
 
 __all__ = [
     "Observation",
+    "PayloadLogger",
     "RequestObserver",
     "get_observer",
+    "get_payload_logger",
     "reset_observer",
+    "reset_payload_logger",
 ]

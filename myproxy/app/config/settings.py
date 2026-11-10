@@ -46,6 +46,12 @@ class Settings(BaseSettings):
     trace_enabled: bool = True
     trace_file: Path | None = None
 
+    # Full request/response payload logging (human-readable .txt).
+    payload_log_enabled: bool = True
+    payload_log_file: Path | None = None
+    payload_log_max_bytes: int = 50 * 1024 * 1024
+    payload_log_backups: int = 1
+
     def model_post_init(self, _ctx: object) -> None:
         """Resolve runtime paths."""
         import os
@@ -57,6 +63,9 @@ class Settings(BaseSettings):
 
         if self.trace_file is None:
             self.trace_file = self.project_root / "logs" / "myproxy.jsonl"
+
+        if self.payload_log_file is None:
+            self.payload_log_file = self.project_root / "logs" / "myproxy-traffic.txt"
 
     @property
     def minimax_keys(self) -> list[str]:

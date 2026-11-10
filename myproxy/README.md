@@ -66,6 +66,57 @@ The `context_length` field is informational — it's exposed via the `X-Context-
 | `MYPROXY_CONFIG_DIR` | Override config directory |
 | `MYPROXY_HOST` | Bind host (default `0.0.0.0`) |
 | `MYPROXY_PORT` | Bind port (default `3566`) |
+| `PAYLOAD_LOG_ENABLED` | Enable the request/response traffic log (default `true`) |
+| `PAYLOAD_LOG_FILE` | Traffic log path (default `logs/myproxy-traffic.txt`) |
+| `PAYLOAD_LOG_MAX_BYTES` | Rotate the traffic log at this size (default `52428800` = 50 MB) |
+| `PAYLOAD_LOG_BACKUPS` | Rotated files to keep (default `1`) |
+| `TRACE_ENABLED` | Enable the JSONL trace file (default `true`) |
+| `TRACE_FILE` | Trace file path (default `logs/myproxy.jsonl`) |
+
+## Traffic log
+
+Every `/v1/messages` request is appended to a human-readable `.txt` file — the
+request body that went to the model, and the response body that came back.
+
+```
+====================================================================================================
+[2026-11-10T09:49:18.841Z] request_id=req_72381fdd5b624c1e8b2ecd6b model=claude-lb-minimax-m3 provider=minimax
+  upstream_model=MiniMax-M3 stream=false status=200 latency_ms=689.123
+  input_tokens=42 output_tokens=17
+--- REQUEST ---
+{
+  "model": "MiniMax-M3",
+  "max_tokens": 100,
+  "messages": [{"role": "user", "content": "What is 2+2?"}]
+}
+--- RESPONSE ---
+{
+  "id": "msg_5cbd185c401b481fb9b14f49",
+  "type": "message",
+  "role": "assistant",
+  "content": [{"type": "text", "text": "Hello!"}],
+  "usage": {"input_tokens": 42, "output_tokens": 17}
+}
+====================================================================================================
+```
+
+Behavior:
+
+- The **REQUEST** section is the exact body sent upstream — same model name,
+  same fields, same provider-specific quirks (e.g. MiniMax drops `thinking`
+  for the M2.x family).
+- The **RESPONSE** section is the Anthropic-shaped message. Streaming requests
+  are reassembled into the same shape as a non-streaming reply, so both modes
+  read identically.
+- Failed requests log an `--- ERROR ---` section instead of a response.
+- Bodies are **scrubbed** — API keys, emails, credit cards, JWTs and the like
+  are replaced with `[REDACTED_*]` before anything hits the disk. Requests
+  rejected before reaching a provider (unknown model, missing API key) are
+  logged too.
+- The file rotates at `PAYLOAD_LOG_MAX_BYTES` (50 MB by default), keeping one
+  previous copy as `myproxy-traffic.1.txt`.
+- The log is local-only — it is never written to the trace file or exposed
+  over the admin API.
 
 ### Key rotation
 

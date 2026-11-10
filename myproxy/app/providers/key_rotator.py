@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import AsyncIterator, Callable
+from typing import Any, AsyncIterator, Callable
 
 import httpx
 
@@ -78,6 +78,14 @@ class KeyRotator(Provider):
 
     def provider_name(self) -> str:
         return self._name
+
+    def build_payload(self, **kwargs: Any) -> dict[str, object]:
+        """Delegate to an inner provider.
+
+        The wire payload never depends on which key is used, so any key
+        produces the same body; a throwaway instance is fine here.
+        """
+        return self._factory(self._keys[0]).build_payload(**kwargs)
 
     def _reserve_start_index(self) -> int:
         """Atomically read the current cursor and advance it by one."""

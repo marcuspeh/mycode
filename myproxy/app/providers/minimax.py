@@ -21,6 +21,41 @@ class MiniMaxProvider(Provider):
     def provider_name(self) -> str:
         return "minimax"
 
+    def build_payload(
+        self,
+        *,
+        model: str,
+        system_prompt: str | None,
+        messages: list[dict[str, object]],
+        max_tokens: int,
+        temperature: float,
+        tools: list[dict[str, object]] | None,
+        stream: bool,
+        thinking: dict[str, object] | None = None,
+        top_p: float | None = None,
+        service_tier: str | None = None,
+        tool_choice: dict[str, object] | None = None,
+    ) -> dict[str, object]:
+        """MiniMax supports Anthropic-style top_p / service_tier / tool_choice
+        directly. `thinking` is only meaningful for MiniMax-M3 — the M2.x
+        family always thinks and ignores the parameter.
+        """
+        if thinking and not model.startswith("MiniMax-M3"):
+            thinking = None
+        return super().build_payload(
+            model=model,
+            system_prompt=system_prompt,
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            tools=tools,
+            stream=stream,
+            thinking=thinking,
+            top_p=top_p,
+            service_tier=service_tier,
+            tool_choice=tool_choice,
+        )
+
     async def messages(
         self,
         model: str,
@@ -35,28 +70,19 @@ class MiniMaxProvider(Provider):
         service_tier: str | None = None,
         tool_choice: dict[str, object] | None = None,
     ) -> AsyncIterator[ProviderResponse | str]:
-        payload: dict[str, object] = {
-            "model": model,
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "messages": [dict(m) for m in messages],
-            "stream": stream,
-        }
-        if system_prompt:
-            payload["system"] = system_prompt
-        if tools:
-            payload["tools"] = tools
-        # MiniMax supports Anthropic-style top_p / service_tier / tool_choice
-        # directly. `thinking` is only meaningful for MiniMax-M3 — the M2.x
-        # family always thinks and ignores the parameter.
-        if top_p is not None:
-            payload["top_p"] = top_p
-        if service_tier:
-            payload["service_tier"] = service_tier
-        if tool_choice:
-            payload["tool_choice"] = tool_choice
-        if thinking and model.startswith("MiniMax-M3"):
-            payload["thinking"] = thinking
+        payload = self.build_payload(
+            model=model,
+            system_prompt=system_prompt,
+            messages=messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            tools=tools,
+            stream=stream,
+            thinking=thinking,
+            top_p=top_p,
+            service_tier=service_tier,
+            tool_choice=tool_choice,
+        )
 
         headers = {
             "x-api-key": self._api_key,

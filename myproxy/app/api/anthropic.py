@@ -14,7 +14,8 @@ from fastapi import APIRouter, HTTPException, Request as FastAPIRequest
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
-from app.observability import get_observer
+from app.observability import Observation, get_observer
+from app.observability.payload_log import get_payload_logger
 from app.providers import get_provider
 from app.providers.base import ProviderResponse
 from app.providers.key_rotator import KeyRotator
@@ -131,6 +132,178 @@ async def _yield_sse_event(event: dict[str, object]) -> str:
     return f"event: {event.get('type', 'message')}\ndata: {data}\n\n"
 
 
+class _StreamAssembler:
+    """Reassembles an Anthropic-shaped final message from SSE events.
+
+    Upstream providers stream ``message_start`` / ``content_block_delta``
+    / ``message_delta`` / ``message_stop`` frames. This collects them into
+    the single message object a non-streaming request would have returned,
+    so the payload log shows the same shape for both modes.
+    """
+
+    def __init__(self) -> None:
+        self._message: dict[str, object] | None = None
+        self._blocks: dict[int, dict[str, object]] = {}
+        self._usage: dict[str, int] = {}
+        self._model: str | None = None
+        self._id: str | None = None
+        self._stop_reason: str | None = None
+
+    def feed_frame(self, frame: str) -> None:
+        """Consume one ``event:/data:`` frame."""
+        for line in frame.splitlines():
+            if not line.startswith("data:"):
+                continue
+            try:
+                event = json.loads(line[len("data:"):].strip())
+            except ValueError:
+                continue
+            if isinstance(event, dict):
+                self.feed_event(event)
+
+    def feed_event(self, event: dict[str, object]) -> None:
+        """Consume one decoded SSE event."""
+        event_type = event.get("type")
+        index = event.get("index")
+
+        if event_type == "message":
+            # The proxy's own terminal frame — already the final message.
+            self._message = dict(event)
+            return
+
+        if event_type == "message_start":
+            message = event.get("message")
+            if isinstance(message, dict):
+                self._id = message.get("id")
+                self._model = message.get("model")
+                self._merge_usage(message.get("usage"))
+            return
+
+        if event_type == "content_block_start":
+            block = event.get("content_block")
+            if isinstance(block, dict) and isinstance(index, int):
+                self._blocks[index] = dict(block)
+            return
+
+        if event_type == "content_block_delta":
+            delta = event.get("delta")
+            if isinstance(delta, dict) and isinstance(index, int):
+                block = self._block(index)
+                for key, value in delta.items():
+                    if key == "signature":
+                        block["signature"] = value
+                    elif key in ("text", "thinking") and isinstance(value, str):
+                        block[key] = f"{block.get(key, '')}{value}"
+                    elif key == "partial_json" and isinstance(value, str):
+                        block["partial_json"] = (
+                            f"{block.get('partial_json', '')}{value}"
+                        )
+            return
+
+        if event_type == "message_delta":
+            delta = event.get("delta")
+            if isinstance(delta, dict) and delta.get("stop_reason"):
+                self._stop_reason = str(delta["stop_reason"])
+            self._merge_usage(event.get("usage"))
+            return
+
+    def _block(self, index: int) -> dict[str, object]:
+        return self._blocks.setdefault(index, {"type": "text", "text": ""})
+
+    def _merge_usage(self, usage: object) -> None:
+        if not isinstance(usage, dict):
+            return
+        for key, value in usage.items():
+            if isinstance(value, int):
+                self._usage[key] = value
+
+    def result(self, model: str) -> dict[str, object]:
+        """Return the reassembled message."""
+        if self._message is not None:
+            return self._message
+        return {
+            "id": self._id,
+            "type": "message",
+            "role": "assistant",
+            "content": [self._blocks[i] for i in sorted(self._blocks)],
+            "model": self._model or model,
+            "stop_reason": self._stop_reason,
+            "stop_sequence": None,
+            "usage": self._usage,
+        }
+
+    def to_provider_response(self, model: str) -> ProviderResponse | None:
+        """Build a ProviderResponse from the streamed events.
+
+        Returns ``None`` when the stream carried no content and no usage,
+        so callers can tell "nothing arrived" from "an empty reply".
+        """
+        message = self.result(model)
+        blocks = message.get("content")
+        content_blocks = [b for b in blocks if isinstance(b, dict)] if isinstance(blocks, list) else []
+        text_parts = [
+            str(b.get("text", ""))
+            for b in content_blocks
+            if b.get("type") == "text" and b.get("text")
+        ]
+        usage = message.get("usage")
+        usage_map = usage if isinstance(usage, dict) else {}
+        if not content_blocks and not usage_map:
+            return None
+        return ProviderResponse(
+            content="\n".join(text_parts),
+            content_blocks=content_blocks,
+            stop_reason=str(message.get("stop_reason") or "end_turn"),
+            input_tokens=int(usage_map.get("input_tokens", 0) or 0),
+            output_tokens=int(usage_map.get("output_tokens", 0) or 0),
+            cache_creation_input_tokens=int(
+                usage_map.get("cache_creation_input_tokens", 0) or 0
+            ),
+            cache_read_input_tokens=int(
+                usage_map.get("cache_read_input_tokens", 0) or 0
+            ),
+        )
+
+
+def _log_exchange(
+    obs: "Observation",
+    *,
+    provider_name: str,
+    upstream_model: str,
+    request_payload: object,
+    response_payload: object | None = None,
+    error: str | None = None,
+    status: int | None = None,
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
+) -> None:
+    """Append this exchange to the human-readable payload log.
+
+    The response is scrubbed here, so PII echoed back by the model never
+    reaches the file. The request body is expected to be scrubbed
+    already — see ``_log_rejected`` for the one path where it is not.
+    """
+    safe_response = (
+        get_scrubber().scrub(response_payload).redacted
+        if response_payload is not None
+        else None
+    )
+    get_payload_logger().log_exchange(
+        request_id=obs.request_id,
+        model_alias=obs.model_alias,
+        upstream_model=upstream_model,
+        provider=provider_name,
+        stream=obs.stream,
+        status=obs.status if status is None else status,
+        latency_ms=obs.latency_ms,
+        request_payload=request_payload,
+        response_payload=safe_response,
+        error=error,
+        input_tokens=obs.input_tokens if input_tokens is None else input_tokens,
+        output_tokens=obs.output_tokens if output_tokens is None else output_tokens,
+    )
+
+
 class _SSERewriter:
     """Rewrite raw upstream SSE lines into Anthropic-spec events.
 
@@ -211,6 +384,28 @@ class _SSERewriter:
         return f"event: {event_type}\ndata: {data}\n\n"
 
 
+def _log_rejected(
+    obs: "Observation",
+    request: "MessagesRequest",
+    error: str,
+) -> None:
+    """Log a request that was rejected before reaching a provider.
+
+    These requests never went through the outbound scrubber, so the
+    body is scrubbed here.
+    """
+    payload = get_scrubber().scrub(
+        request.model_dump(exclude_none=True)
+    ).redacted
+    _log_exchange(
+        obs,
+        provider_name="none",
+        upstream_model=request.model,
+        request_payload=payload,
+        error=error,
+    )
+
+
 # ---- Endpoint ----
 
 @router.post("/messages", response_model=None)
@@ -236,6 +431,7 @@ async def messages(
     resolved = registry.get(request.model)
     if resolved is None:
         observer.finish_error(obs, 400, f"unknown model: {request.model}")
+        _log_rejected(obs, request, f"unknown model: {request.model}")
         raise HTTPException(
             status_code=400,
             detail=f"Unknown model: {request.model}",
@@ -245,6 +441,7 @@ async def messages(
     provider = get_provider(provider_name)
     if provider is None:
         observer.finish_error(obs, 400, f"provider not configured: {provider_name}")
+        _log_rejected(obs, request, f"provider not configured: {provider_name}")
         raise HTTPException(
             status_code=400,
             detail=f"Provider '{provider_name}' not configured (missing API key)",
@@ -331,6 +528,25 @@ async def messages(
     if scrub_result.events:
         logger.info("scrubbed", extra={"event_count": len(scrub_result.events)})
 
+    # Build the exact body that goes on the wire, for the payload log.
+    try:
+        request_payload = provider.build_payload(
+            model=actual_model,
+            system_prompt=system_text,
+            messages=messages_list,
+            max_tokens=request.max_tokens,
+            temperature=request.temperature,
+            tools=tools_list,
+            stream=request.stream,
+            thinking=request.thinking,
+            top_p=request.top_p,
+            service_tier=request.service_tier,
+            tool_choice=tool_choice_payload,
+        )
+    except Exception:
+        # Logging must never break the request.
+        request_payload = {"model": actual_model, "messages": messages_list}
+
     # Call provider
     try:
         gen_result = provider.messages(
@@ -350,6 +566,13 @@ async def messages(
         if on_key_cb is not None:
             provider.set_on_key(None)
         observer.finish_error(obs, 502, f"provider invocation failed: {e}")
+        _log_exchange(
+            obs,
+            provider_name=provider_name,
+            upstream_model=actual_model,
+            request_payload=request_payload,
+            error=f"provider invocation failed: {e}",
+        )
         logger.exception("provider error: %s", e)
         raise HTTPException(status_code=502, detail=f"Provider error: {e}")
 
@@ -361,11 +584,25 @@ async def messages(
             if on_key_cb is not None:
                 provider.set_on_key(None)
             observer.finish_error(obs, 502, "provider returned no response")
+            _log_exchange(
+                obs,
+                provider_name=provider_name,
+                upstream_model=actual_model,
+                request_payload=request_payload,
+                error="provider returned no response",
+            )
             raise HTTPException(status_code=502, detail="Provider returned no response")
         except Exception as e:
             if on_key_cb is not None:
                 provider.set_on_key(None)
             observer.finish_error(obs, 502, f"provider error: {e}")
+            _log_exchange(
+                obs,
+                provider_name=provider_name,
+                upstream_model=actual_model,
+                request_payload=request_payload,
+                error=f"provider error: {e}",
+            )
             logger.exception("provider error: %s", e)
             raise HTTPException(status_code=502, detail=f"Provider error: {e}")
 
@@ -374,10 +611,24 @@ async def messages(
 
         if not isinstance(pr, ProviderResponse):
             observer.finish_error(obs, 500, "unexpected provider response type")
+            _log_exchange(
+                obs,
+                provider_name=provider_name,
+                upstream_model=actual_model,
+                request_payload=request_payload,
+                error="unexpected provider response type",
+            )
             raise HTTPException(status_code=500, detail="Unexpected provider response")
 
         observer.finish_success(obs, 200, pr)
         anthropic_resp = _provider_response_to_anthropic(pr, request.model)
+        _log_exchange(
+            obs,
+            provider_name=provider_name,
+            upstream_model=actual_model,
+            request_payload=request_payload,
+            response_payload=anthropic_resp,
+        )
         return JSONResponse(
             content=anthropic_resp,
             headers={
@@ -389,26 +640,32 @@ async def messages(
 
     # Streaming
     final_pr: ProviderResponse | None = None
+    final_response: dict[str, object] | None = None
     stream_error: str | None = None
 
     async def stream_wrapper() -> AsyncIterator[str]:
-        nonlocal final_pr, stream_error
+        nonlocal final_pr, final_response, stream_error
         rewriter = _SSERewriter()
+        assembler = _StreamAssembler()
         try:
             async for item in gen_result:
                 if isinstance(item, str):
                     for framed in rewriter.feed(item):
+                        assembler.feed_frame(framed)
                         yield framed
                 elif isinstance(item, ProviderResponse):
                     # Flush any pending upstream SSE frames first, then
                     # emit the final response as a single 'message' event.
                     for framed in rewriter.flush():
+                        assembler.feed_frame(framed)
                         yield framed
                     final_pr = item
                     anthropic_resp = _provider_response_to_anthropic(item, request.model)
+                    final_response = anthropic_resp
                     yield await _yield_sse_event(anthropic_resp)
             # End of stream — flush any trailing partial frame.
             for framed in rewriter.flush():
+                assembler.feed_frame(framed)
                 yield framed
         except Exception as e:
             stream_error = str(e)
@@ -418,12 +675,40 @@ async def messages(
             # even if the client disconnected mid-stream.
             if on_key_cb is not None:
                 provider.set_on_key(None)
+            if final_pr is None and stream_error is None:
+                # Upstream providers that stream raw SSE never send a
+                # terminal response object — rebuild one from the events.
+                final_pr = assembler.to_provider_response(request.model)
+                if final_pr is not None:
+                    final_response = _provider_response_to_anthropic(
+                        final_pr, request.model
+                    )
             if final_pr is not None:
                 observer.finish_success(obs, 200, final_pr)
             elif stream_error is not None:
                 observer.finish_error(obs, 500, f"stream error: {stream_error}")
             elif not obs.finished:
                 observer.finish_error(obs, 500, "stream ended without provider response")
+
+            # Log the reassembled final message. The provider's terminal
+            # response wins; otherwise fall back to the streamed events.
+            logged_response = final_response or assembler.result(request.model)
+            usage = logged_response.get("usage")
+            usage_map = usage if isinstance(usage, dict) else {}
+            _log_exchange(
+                obs,
+                provider_name=provider_name,
+                upstream_model=actual_model,
+                request_payload=request_payload,
+                response_payload=logged_response,
+                error=(
+                    None
+                    if stream_error is None and final_pr is not None
+                    else (stream_error or "stream ended without provider response")
+                ),
+                input_tokens=int(usage_map.get("input_tokens", 0) or 0),
+                output_tokens=int(usage_map.get("output_tokens", 0) or 0),
+            )
 
     return StreamingResponse(
         stream_wrapper(),
